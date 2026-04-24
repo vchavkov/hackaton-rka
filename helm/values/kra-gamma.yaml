@@ -2,8 +2,8 @@ podinfo:
   color: "#ff9800"
 secret:
   data:
-    PASSWORD: "nb6PME9qZqriIAQChFwTYV16pKx1Jjv1"
-    UPDATED_AT: "2026-04-24 13:22 UTC"
+    PASSWORD: "mrxUTlzKXxZtRvzluDXwIUXjDopAcWD2"
+    UPDATED_AT: "2026-04-24 13:24 UTC"
 ingress:
   enabled: true
   className: "nginx"

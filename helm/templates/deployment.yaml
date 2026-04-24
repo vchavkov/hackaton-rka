@@ -35,6 +35,7 @@ spec:
               containerPort: 8080
               protocol: TCP
           # ── secrets exposed as individual env vars ─────────────────
+          env:
           {{- if .Values.secretMount.envVars }}
           {{- $secretName := include "key-rotation-agent.secretName" . }}
           {{- range $key := keys .Values.secret.data }}

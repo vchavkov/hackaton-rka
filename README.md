@@ -120,10 +120,14 @@ Or use port-forwards (no ingress required):
 
 Rotation flow:
 1. Finds the secret with the oldest `kra/rotated-at` annotation (falls back to `managedFields` for secrets that have never been rotated), ensuring each release is rotated in round-robin order.
-2. Patches the ArgoCD Application's Helm values with a new `PASSWORD` and `UPDATED_AT`.
-3. Stamps `kra/rotated-at=<now>` directly on the Secret so future runs compare ages correctly (the Secret has `helm.sh/resource-policy: keep`, so Helm never re-applies it and `managedFields` stays frozen at deploy time).
-4. ArgoCD syncs → Helm re-renders → `checksum/secret` annotation changes → Deployment rolls.
-5. Issues an explicit `kubectl rollout restart` as a belt-and-suspenders fallback.
+2. Reads the current `helm/values/<release>.yaml` file from the Git repo to preserve color and ingress settings.
+3. Generates a new 32-character random password and writes it to `helm/values/<release>.yaml`.
+4. Runs `git commit` + `git push` with a `chore(rotation): rotate password for <release>` message.
+5. ArgoCD detects the new commit, syncs, Helm re-renders the `checksum/secret` annotation on the Deployment → pods roll automatically.
+6. Stamps `kra/rotated-at=<now>` on the Secret so future runs compare ages correctly (the Secret has `helm.sh/resource-policy: keep`, so ArgoCD never re-applies it and `managedFields` stays frozen at initial deploy time).
+
+> **Why Git and not in-cluster patching?**  
+> ArgoCD has `selfHeal: true`, so any in-cluster change that diverges from Git gets reverted on the next reconcile cycle. Writing the password to a file in Git is the only change that is guaranteed to survive — and it also gives a full audit trail of every rotation as a git log.
 
 ## secret-age.py Reference
 
@@ -154,7 +158,7 @@ Environment variable overrides: `NAMESPACE`, `ARGOCD_NAMESPACE`.
 | Command | Description |
 |---|---|
 | `bootstrap` | Install ingress-nginx (auto-detects kind / minikube / cloud) |
-| `deploy` | Create/update 4 ArgoCD Applications with random secrets |
+| `deploy` | Seed `helm/values/<release>.yaml` files (if new), commit + push, create ArgoCD Applications |
 | `metallb` | Install MetalLB and configure an IP pool for kind clusters |
 | `dns` | Add wildcard `address=/<domain>/<ip>` to dnsmasq |
 | `hosts` | Write `/etc/hosts` entries (alternative to dns) |

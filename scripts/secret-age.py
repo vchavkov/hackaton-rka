@@ -3,11 +3,11 @@
 secret-age.py — monitor, rotate and clean up Kubernetes secrets.
 
 Detects secrets in a Kubernetes namespace, reports their age, and can
-rotate the oldest one via an ArgoCD Application patch or clean up stale
-Helm release-history secrets.
+rotate the oldest one by updating its per-release values file in Git and
+pushing, so ArgoCD picks up the commit and syncs automatically.
 
 Default action:
-  namespace == "demo"  → rotate the oldest secret via ArgoCD
+  namespace == "demo"  → rotate the oldest secret via Git commit + push
   any other namespace  → check & report secret ages
 
 Use --rotate / --no-rotate to override, or --cleanup to delete unused secrets.
@@ -18,12 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import secrets
 import string
 import subprocess
 import sys
 import textwrap
+import yaml
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -203,6 +203,25 @@ def _output_json(ns: str, threshold_days: int, rows: list[dict]) -> None:
 
 # ── cmd: rotate ───────────────────────────────────────────────────────────────
 
+def _git(repo_root: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", repo_root, *args],
+        capture_output=True, text=True, check=True,
+    )
+
+
+def _find_repo_root() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    result = subprocess.run(
+        ["git", "-C", script_dir, "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        err("Not inside a git repository — cannot commit rotation")
+        sys.exit(1)
+    return result.stdout.strip()
+
+
 def cmd_rotate(ns: str, argocd_ns: str) -> None:
     print(bold(f"Finding oldest secret — namespace: {ns}"))
 
@@ -231,24 +250,31 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
     info(f"Age           : {human_duration(age_secs)} (last updated: {str(oldest_ts)[:19]})")
     print()
 
-    # Fetch the ArgoCD Application to preserve color / ingress settings.
-    result = kubectl("get", "application", release, "-n", argocd_ns, "-o", "json", check=False)
-    if result.returncode != 0:
-        err(f"ArgoCD Application '{release}' not found in namespace '{argocd_ns}'")
+    # ── Locate the per-release values file in Git ─────────────────────────────
+    repo_root = _find_repo_root()
+    values_rel = os.path.join("helm", "values", f"{release}.yaml")
+    values_path = os.path.join(repo_root, values_rel)
+
+    if not os.path.exists(values_path):
+        err(f"Values file not found: {values_path}")
+        err("Run './scripts/demo.sh deploy' first to seed the values files.")
         sys.exit(1)
-    app = json.loads(result.stdout)
-    vals = app["spec"]["source"]["helm"].get("values", "")
 
-    def extract(pattern: str, default: str = "") -> str:
-        m = re.search(pattern, vals, re.MULTILINE)
-        return m.group(1).strip().strip("\"' ") if m else default
+    # Parse current values to preserve color / ingress settings.
+    import yaml  # optional dep; fall back to regex if unavailable
+    try:
+        with open(values_path) as f:
+            current = yaml.safe_load(f) or {}
+    except Exception:
+        current = {}
 
-    color         = extract(r'^\s+color:\s*["\']?([^"\'\n]+)["\']?', "#000000")
-    hostname      = extract(r'^\s+host:\s*["\']?([^"\'\n]+)["\']?', "")
-    ingress_class = extract(r'className:\s*["\']?([^"\'\n]+)["\']?', "nginx")
+    color = (current.get("podinfo") or {}).get("color", "#000000")
+    ingress_cfg = (current.get("ingress") or {})
+    hosts = ingress_cfg.get("hosts") or []
+    hostname = (hosts[0].get("host", "") if hosts else "") or ""
+    ingress_class = ingress_cfg.get("className", "nginx")
 
-    # If hostname was lost from values (e.g. wiped by a previous bad rotation),
-    # fall back to the live Ingress object.
+    # Fall back to live Ingress if the values file has no host yet.
     if not hostname:
         ing = kubectl(
             "get", "ingress", "-n", ns,
@@ -258,12 +284,13 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
         )
         hostname = ing.stdout.strip()
 
-    # Generate new credentials.
+    # ── Generate new credentials ───────────────────────────────────────────────
     alphabet = string.ascii_letters + string.digits
     db_password = "".join(secrets.choice(alphabet) for _ in range(32))
     db_password_fmt = "-".join(db_password[i:i+8] for i in range(0, 32, 8))
     updated_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    # ── Step 1: write new password to the values file ─────────────────────────
     new_values = textwrap.dedent(f"""\
         podinfo:
           color: "{color}"
@@ -280,26 +307,24 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
                 - path: /
                   pathType: Prefix
     """)
+    with open(values_path, "w") as f:
+        f.write(new_values)
 
-    patch = json.dumps({
-        "spec": {
-            "source": {"helm": {"values": new_values}},
-            # Clear ignoreDifferences so the chart's checksum/secret annotation
-            # is no longer suppressed and ArgoCD will re-apply the Deployment,
-            # which in turn triggers a rolling restart of pods.
-            "ignoreDifferences": [],
-        }
-    })
+    # ── Step 2: git commit + push ─────────────────────────────────────────────
+    # ArgoCD watches the repo; on push it will sync, Helm re-renders the
+    # checksum/secret annotation on the Deployment, and pods roll automatically.
+    try:
+        _git(repo_root, "add", values_rel)
+        _git(repo_root, "commit", "-m",
+             f"chore(rotation): rotate password for {release} [{updated_at}]")
+        _git(repo_root, "push")
+    except subprocess.CalledProcessError as exc:
+        err(f"Git operation failed: {exc.stderr.strip()}")
+        sys.exit(1)
 
-    kubectl("patch", "application", release,
-            "-n", argocd_ns,
-            "--type=merge",
-            "-p", patch)
-
-    # Stamp the rotation timestamp directly on the Secret so that the next
-    # run of cmd_rotate can reliably compare ages across all releases.
-    # (The Secret has helm.sh/resource-policy:keep so Helm never re-applies
-    # it, meaning managedFields stays frozen at the initial deploy time.)
+    # ── Step 3: stamp rotation time on the Secret ─────────────────────────────
+    # ArgoCD skips the Secret (resource-policy:keep) so managedFields stays
+    # frozen. We write our own annotation so round-robin age comparison works.
     rotated_iso = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     kubectl("annotate", "secret", secret_name,
             "-n", ns,
@@ -309,20 +334,8 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
     print()
     ok(f"Rotated: {release}")
     info(f"New PASSWORD : {db_password_fmt}")
-    info("ArgoCD will sync; checksum/secret annotation will trigger a rolling restart")
-
-    # Belt-and-suspenders: issue an explicit rollout restart so the pods roll
-    # immediately rather than waiting for the next ArgoCD reconcile.
-    dep_result = kubectl(
-        "get", "deployment", "-n", ns,
-        "-l", f"app.kubernetes.io/instance={release}",
-        "-o", "jsonpath={.items[0].metadata.name}",
-        check=False,
-    )
-    deploy_name = dep_result.stdout.strip()
-    if deploy_name:
-        kubectl("-n", ns, "rollout", "restart", f"deployment/{deploy_name}")
-        info(f"Rolling restart triggered: deployment/{deploy_name}")
+    info(f"Values file  : {values_rel}")
+    info("Git pushed   → ArgoCD will sync → checksum/secret changes → pods roll")
 
 
 # ── cmd: cleanup ──────────────────────────────────────────────────────────────

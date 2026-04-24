@@ -245,21 +245,47 @@ cmd_deploy() {
     local hostname
     hostname="$(release_host "$release")"
 
-    local db_password;   db_password="$(rand_hex 16)"
-    local updated_at;    updated_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
+    local values_file="${CHART_DIR}/values/${release}.yaml"
 
-    local db_password_fmt
-    db_password_fmt="$(echo "$db_password" | sed 's/.\{8\}/&-/g; s/-$//')"
+    # Seed the values file only if it does not exist yet. If it already exists
+    # (e.g. from a previous rotation committed to Git) we keep its password.
+    if [[ ! -f "$values_file" ]]; then
+      local db_password;   db_password="$(rand_hex 16)"
+      local updated_at;    updated_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
 
-    bold "[$((i+1))/${#RELEASES[@]}] $release  →  http://${hostname}"
-    info "PASSWORD      = $db_password_fmt"
-    info "Updated       = $updated_at"
+      local db_password_fmt
+      db_password_fmt="$(echo "$db_password" | sed 's/.\{8\}/&-/g; s/-$//')"
 
-    # Create ArgoCD Application — ArgoCD will run the Helm install/upgrade.
-    # NOTE: We intentionally do NOT add ignoreDifferences for the
-    # `checksum/secret` annotation. That annotation is the chart's mechanism
-    # for triggering a rolling restart when the Secret content changes; if
-    # ArgoCD is told to ignore it, secret rotations no longer roll the pods.
+      bold "[$((i+1))/${#RELEASES[@]}] $release  →  http://${hostname}"
+      info "Seeding values file  = $values_file"
+      info "PASSWORD             = $db_password_fmt"
+
+      cat > "$values_file" <<VALS
+podinfo:
+  color: "${color}"
+secret:
+  data:
+    PASSWORD: "${db_password}"
+    UPDATED_AT: "${updated_at}"
+ingress:
+  enabled: true
+  className: "${INGRESS_CLASS}"
+  hosts:
+    - host: "${hostname}"
+      paths:
+        - path: /
+          pathType: Prefix
+VALS
+
+      git -C "${SCRIPT_DIR}/.." add "$values_file"
+    else
+      bold "[$((i+1))/${#RELEASES[@]}] $release  →  http://${hostname}"
+      info "Using existing values file: $values_file"
+    fi
+
+    # Create ArgoCD Application pointing at the per-release values file.
+    # Rotation works by updating that file + git commit + git push; ArgoCD
+    # picks up the commit and syncs automatically — no in-cluster patching needed.
     kubectl apply -f - <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -276,21 +302,8 @@ spec:
     path: helm
     helm:
       releaseName: ${release}
-      values: |
-        podinfo:
-          color: "${color}"
-        secret:
-          data:
-            PASSWORD: "${db_password}"
-            UPDATED_AT: "${updated_at}"
-        ingress:
-          enabled: true
-          className: "${INGRESS_CLASS}"
-          hosts:
-            - host: "${hostname}"
-              paths:
-                - path: /
-                  pathType: Prefix
+      valueFiles:
+        - values/${release}.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: ${NAMESPACE}
@@ -306,6 +319,15 @@ EOF
     ok "$release Application created"
     echo
   done
+
+  # Commit + push any newly seeded values files so ArgoCD can read them.
+  if ! git -C "${SCRIPT_DIR}/.." diff --cached --quiet; then
+    info "Committing seeded values files..."
+    git -C "${SCRIPT_DIR}/.." commit -m "chore: seed initial helm values for demo releases"
+    git -C "${SCRIPT_DIR}/.." push
+    ok "Values files committed and pushed"
+    echo
+  fi
 
   sep
   bold "Waiting for ArgoCD to sync and report Healthy..."

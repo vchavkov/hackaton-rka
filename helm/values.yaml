@@ -1,0 +1,85 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/stefanprodan/podinfo
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to Chart.appVersion
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 9898
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: key-rotation-agent.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# ------------------------------------------------------------
+# Secret configuration
+# ------------------------------------------------------------
+# Set create: true to let the chart create a Secret from the
+# values below.  Set create: false and provide existingSecret
+# to reference a Secret that already exists (e.g. created by
+# External Secrets Operator or Vault Agent Injector).
+secret:
+  create: true
+  existingSecret: ""   # used only when create: false
+  name: ""             # defaults to <release-name>-credentials
+
+  # Key/value pairs written into the Secret.
+  # In a real rotation workflow these values are replaced by
+  # the rotation agent; the chart just seeds the initial state.
+  data:
+    API_KEY: "changeme-initial-api-key"
+    DB_PASSWORD: "changeme-initial-db-password"
+    WEBHOOK_TOKEN: "changeme-initial-webhook-token"
+
+# How secrets are consumed by the pod
+secretMount:
+  # Mount the secret as a read-only volume at this path
+  volumePath: /etc/secrets
+  # Also expose each key as an environment variable
+  envVars: true
+
+# podinfo UI / behaviour knobs (passed via env vars)
+podinfo:
+  # Colour shown on the podinfo UI — useful to distinguish rotated vs. not
+  color: "#2196f3"
+  message: "Key Rotation Agent — hackathon demo"
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

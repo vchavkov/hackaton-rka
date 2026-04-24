@@ -193,28 +193,39 @@ uninstall).
 ### `scripts/secret-age.py`
 
 ```text
-usage: ./scripts/secret-age.py [-h] [--namespace NS] [--argocd-namespace NS]
-                               [--threshold-days N] [--alert-only] [--json]
-                               [--sort-by-age] [--rotate | --no-rotate]
-                               [--cleanup] [--include-unreferenced] [--dry-run]
+usage: ./scripts/secret-age.py [-h] [--namespace NAMESPACE]
+                               [--argocd-namespace ARGOCD_NAMESPACE]
+                               [--threshold-days THRESHOLD_DAYS]
+                               [--alert-only] [--json] [--sort-by-age]
+                               [--rotate | --no-rotate] [--cleanup]
+                               [--include-unreferenced] [--dry-run]
+
+Monitor secret age, rotate the oldest secret, or clean up unused secrets.
 
 Default action:
   namespace == "demo"  → rotate the oldest secret via ArgoCD
   any other namespace  → check & report secret ages
 
-Options:
-  --namespace, -n NS        Kubernetes namespace (default: demo)
-  --argocd-namespace NS     ArgoCD namespace (default: argocd)
-  --threshold-days N        Age threshold in days for check mode (default: 7)
-  --alert-only              Only show secrets exceeding the threshold
-  --json                    Output check results as JSON
-  --sort-by-age             Sort check results oldest first
-  --rotate                  Force rotation of the oldest secret via ArgoCD
-  --no-rotate               Force check-only (skip rotation even on 'demo')
-  --cleanup                 Delete stale Helm release-history secrets
-  --include-unreferenced    With --cleanup: also delete unreferenced secrets
-  --dry-run                 With --cleanup: list candidates without deleting
-  -h, --help                Show this help message
+Use --rotate / --no-rotate to override, or --cleanup for housekeeping.
+
+options:
+  --namespace NAMESPACE, -n NAMESPACE
+                        Kubernetes namespace (default: demo)
+  --argocd-namespace ARGOCD_NAMESPACE
+                        ArgoCD namespace (default: argocd)
+  --threshold-days THRESHOLD_DAYS
+                        Age threshold in days for check mode (default: 7)
+  --alert-only          Only show secrets exceeding the threshold
+  --json                Output check results as JSON
+  --sort-by-age         Sort check results oldest first
+  --rotate              Force rotation of the oldest secret via ArgoCD
+  --no-rotate           Force check-only (skip rotation even on 'demo')
+  --cleanup             Delete stale Helm release-history secrets
+  --include-unreferenced
+                        With --cleanup: also delete secrets not referenced by
+                        any pod/controller/SA/Ingress
+  --dry-run             With --cleanup: list candidates without deleting
+  -h, --help            show this help message and exit
 ```
 
 #### Default behavior
@@ -324,5 +335,3 @@ applied so the control plane isn't accidentally broken:
 # Apply it
 ./scripts/secret-age.py --cleanup --include-unreferenced
 ```
-
-Requires `kubectl` and `python3` on `PATH`.

@@ -247,6 +247,17 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
     hostname      = extract(r'^\s+host:\s*["\']?([^"\'\n]+)["\']?', "")
     ingress_class = extract(r'className:\s*["\']?([^"\'\n]+)["\']?', "nginx")
 
+    # If hostname was lost from values (e.g. wiped by a previous bad rotation),
+    # fall back to the live Ingress object.
+    if not hostname:
+        ing = kubectl(
+            "get", "ingress", "-n", ns,
+            "-l", f"app.kubernetes.io/instance={release}",
+            "-o", "jsonpath={.items[0].spec.rules[0].host}",
+            check=False,
+        )
+        hostname = ing.stdout.strip()
+
     # Generate new credentials.
     alphabet = string.ascii_letters + string.digits
     db_password = "".join(secrets.choice(alphabet) for _ in range(32))

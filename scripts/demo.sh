@@ -22,6 +22,7 @@ INGRESS_CLASS="${INGRESS_CLASS:-nginx}"
 RELEASES=(kra-alpha kra-beta kra-gamma kra-delta)
 COLORS=("#e91e63" "#4caf50" "#ff9800" "#9c27b0")
 
+ARGOCD_NAMESPACE="${ARGOCD_NAMESPACE:-demo}"
 HOSTS_MARKER_START="# kra-demo-start managed by demo.sh"
 HOSTS_MARKER_END="# kra-demo-end"
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/dnsmasq.conf}"
@@ -204,7 +205,6 @@ EOF
 
 # ── deploy ────────────────────────────────────────────────────────────────────
 cmd_deploy() {
-  require_cmd helm
   require_cmd openssl
   require_cmd kubectl
 
@@ -216,17 +216,23 @@ cmd_deploy() {
     cmd_metallb
   fi
 
-  bold "Deploying ${#RELEASES[@]} releases"
+  # ArgoCD needs a git remote to pull the chart from
+  local git_url git_revision
+  git_url="$(git -C "${SCRIPT_DIR}/.." remote get-url origin 2>/dev/null || true)"
+  git_revision="$(git -C "${SCRIPT_DIR}/.." rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'HEAD')"
+  if [[ -z "$git_url" ]]; then
+    err "No git remote found. ArgoCD requires a git repository URL."
+    err "Push your repo and try again, or set: git remote add origin <url>"
+    exit 1
+  fi
+
+  bold "Deploying ${#RELEASES[@]} releases via ArgoCD"
   info "namespace    : $NAMESPACE"
+  info "argocd ns    : $ARGOCD_NAMESPACE"
   info "domain       : $DOMAIN"
   info "ingressClass : $INGRESS_CLASS"
+  info "git source   : $git_url @ $git_revision"
   sep
-
-  # Double-quoted trap: expands $tmp_dir now so it's captured even after
-  # cmd_deploy returns and the local variable goes out of scope.
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  trap "rm -rf '$tmp_dir'" EXIT
 
   for i in "${!RELEASES[@]}"; do
     local release="${RELEASES[$i]}"
@@ -239,10 +245,9 @@ cmd_deploy() {
     local webhook_token; webhook_token="$(rand_hex 12)"
     local updated_at;    updated_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
 
-    # Format tokens as groups of 8 chars separated by dashes for readability
     local api_key_fmt db_password_fmt webhook_token_fmt
-    api_key_fmt="$(echo "$api_key"       | sed 's/.\{8\}/&-/g; s/-$//')"
-    db_password_fmt="$(echo "$db_password"   | sed 's/.\{8\}/&-/g; s/-$//')"
+    api_key_fmt="$(echo "$api_key"         | sed 's/.\{8\}/&-/g; s/-$//')"
+    db_password_fmt="$(echo "$db_password" | sed 's/.\{8\}/&-/g; s/-$//')"
     webhook_token_fmt="$(echo "$webhook_token" | sed 's/.\{8\}/&-/g; s/-$//')"
 
     bold "[$((i+1))/${#RELEASES[@]}] $release  →  http://${hostname}"
@@ -251,45 +256,87 @@ cmd_deploy() {
     info "WEBHOOK_TOKEN = $webhook_token_fmt"
     info "Updated       = $updated_at"
 
-    local vals="${tmp_dir}/${release}.yaml"
-    cat > "$vals" <<YAML
-podinfo:
-  color: "${color}"
-  message: |
-    Updated:      ${updated_at}
-    API_KEY:      ${api_key_fmt}
-    DB_PASSWORD:  ${db_password_fmt}
-    WEBHOOK_TOKEN:${webhook_token_fmt}
-secret:
-  data:
-    API_KEY: "${api_key}"
-    DB_PASSWORD: "${db_password}"
-    WEBHOOK_TOKEN: "${webhook_token}"
-ingress:
-  enabled: true
-  className: "${INGRESS_CLASS}"
-  hosts:
-    - host: "${hostname}"
-      paths:
-        - path: /
-          pathType: Prefix
-YAML
+    # Create ArgoCD Application — ArgoCD will run the Helm install/upgrade.
+    # ignoreDifferences on the secret checksum annotation prevents OutOfSync/Degraded
+    # every time secrets rotate (the annotation changes on each deploy).
+    kubectl apply -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ${release}
+  namespace: ${ARGOCD_NAMESPACE}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: ${git_url}
+    targetRevision: ${git_revision}
+    path: helm
+    helm:
+      releaseName: ${release}
+      values: |
+        podinfo:
+          color: "${color}"
+          message: |
+            Updated:      ${updated_at}
+            API_KEY:      ${api_key_fmt}
+            DB_PASSWORD:  ${db_password_fmt}
+            WEBHOOK_TOKEN:${webhook_token_fmt}
+        secret:
+          data:
+            API_KEY: "${api_key}"
+            DB_PASSWORD: "${db_password}"
+            WEBHOOK_TOKEN: "${webhook_token}"
+        ingress:
+          enabled: true
+          className: "${INGRESS_CLASS}"
+          hosts:
+            - host: "${hostname}"
+              paths:
+                - path: /
+                  pathType: Prefix
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ${NAMESPACE}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/checksum~1secret
+EOF
 
-    helm upgrade --install "$release" "$CHART_DIR" \
-      --namespace "$NAMESPACE" \
-      --create-namespace \
-      --values "$vals" \
-      --wait \
-      --timeout 120s \
-      --atomic \
-      2>&1 | sed 's/^/    /'
-
-    ok "$release deployed"
+    ok "$release Application created"
     echo
   done
 
   sep
-  bold "All releases deployed."
+  bold "Waiting for ArgoCD to sync and report Healthy..."
+  echo
+  local all_healthy=true
+  for release in "${RELEASES[@]}"; do
+    local health=""
+    for _attempt in $(seq 1 20); do
+      health="$(kubectl get application "$release" -n "$ARGOCD_NAMESPACE" \
+        -o jsonpath='{.status.health.status}' 2>/dev/null || true)"
+      [[ "$health" == "Healthy" ]] && break
+      sleep 6
+    done
+    if [[ "$health" == "Healthy" ]]; then
+      ok "$release → $health"
+    else
+      warn "$release → ${health:-Unknown}  (check: argocd app get $release)"
+      all_healthy=false
+    fi
+  done
+
   echo
   bold "URLs:"
   for release in "${RELEASES[@]}"; do
@@ -452,16 +499,16 @@ cmd_hosts() {
 
 # ── teardown ──────────────────────────────────────────────────────────────────
 cmd_teardown() {
-  require_cmd helm
+  require_cmd kubectl
 
-  bold "Removing ${#RELEASES[@]} releases from namespace: $NAMESPACE"
+  bold "Removing ${#RELEASES[@]} ArgoCD Applications from namespace: $ARGOCD_NAMESPACE"
   sep
   for release in "${RELEASES[@]}"; do
-    if helm status "$release" --namespace "$NAMESPACE" &>/dev/null 2>&1; then
-      helm uninstall "$release" --namespace "$NAMESPACE"
-      ok "uninstalled $release"
+    if kubectl get application "$release" -n "$ARGOCD_NAMESPACE" &>/dev/null 2>&1; then
+      kubectl delete application "$release" -n "$ARGOCD_NAMESPACE"
+      ok "deleted Application $release (finalizer will clean up resources)"
     else
-      info "skipping $release (not found)"
+      info "skipping $release (Application not found)"
     fi
   done
   echo
@@ -494,29 +541,28 @@ cmd_teardown() {
 
 # ── status ────────────────────────────────────────────────────────────────────
 cmd_status() {
-  require_cmd helm
   require_cmd kubectl
 
   [[ -z "$DOMAIN" ]] && DOMAIN="<run deploy first>"
 
-  bold "Release status — namespace: $NAMESPACE"
+  bold "ArgoCD Application status — namespace: $ARGOCD_NAMESPACE"
   sep
-  printf '\033[1m%-20s %-14s %-12s %s\033[0m\n' "RELEASE" "HELM" "POD" "URL"
+  printf '\033[1m%-20s %-12s %-12s %-12s %s\033[0m\n' "RELEASE" "SYNC" "HEALTH" "POD" "URL"
 
   for release in "${RELEASES[@]}"; do
-    if helm status "$release" --namespace "$NAMESPACE" &>/dev/null 2>&1; then
-      local helm_status
-      helm_status="$(helm status "$release" --namespace "$NAMESPACE" -o json | \
-        python3 -c 'import sys,json; print(json.load(sys.stdin)["info"]["status"])' 2>/dev/null \
-        || echo "unknown")"
-      local pod_status
+    if kubectl get application "$release" -n "$ARGOCD_NAMESPACE" &>/dev/null 2>&1; then
+      local sync health pod_status
+      sync="$(kubectl get application "$release" -n "$ARGOCD_NAMESPACE" \
+        -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "?")"
+      health="$(kubectl get application "$release" -n "$ARGOCD_NAMESPACE" \
+        -o jsonpath='{.status.health.status}' 2>/dev/null || echo "?")"
       pod_status="$(kubectl get pods -n "$NAMESPACE" \
         -l "app.kubernetes.io/instance=$release" \
         --no-headers -o custom-columns='S:.status.phase' 2>/dev/null | head -1 || echo "?")"
-      printf '%-20s %-14s %-12s http://%s\n' \
-        "$release" "$helm_status" "$pod_status" "$(release_host "$release")"
+      printf '%-20s %-12s %-12s %-12s http://%s\n' \
+        "$release" "$sync" "$health" "$pod_status" "$(release_host "$release")"
     else
-      printf '%-20s \033[33mnot installed\033[0m\n' "$release"
+      printf '%-20s \033[33mnot found\033[0m\n' "$release"
     fi
   done
   echo

@@ -28,10 +28,18 @@ kubectl port-forward svc/demo-key-rotation-agent 9898:80
 ./scripts/demo.sh hosts
 
 # 3. open browser — no port-forward needed
-#    http://kra-alpha.demo.local
-#    http://kra-beta.demo.local
-#    http://kra-gamma.demo.local
-#    http://kra-delta.demo.local
+
+ArgoCD is now fully accessible:
+- 🌐 URL: http://argocd.demo.local
+- 👤 Username: admin
+- 🔑 Password: TnLMdCP8k6xn4F4j
+
+All the KRA demo releases should also be accessible now:
+- http://kra-alpha.demo.local
+- http://kra-beta.demo.local
+- http://kra-gamma.demo.local
+- http://kra-delta.demo.local
+
 
 # 4. show status + URLs in one line
 ./scripts/demo.sh status

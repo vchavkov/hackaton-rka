@@ -240,20 +240,14 @@ cmd_deploy() {
     local hostname
     hostname="$(release_host "$release")"
 
-    local api_key;       api_key="$(rand_hex 16)"
     local db_password;   db_password="$(rand_hex 16)"
-    local webhook_token; webhook_token="$(rand_hex 12)"
     local updated_at;    updated_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
 
-    local api_key_fmt db_password_fmt webhook_token_fmt
-    api_key_fmt="$(echo "$api_key"         | sed 's/.\{8\}/&-/g; s/-$//')"
+    local db_password_fmt
     db_password_fmt="$(echo "$db_password" | sed 's/.\{8\}/&-/g; s/-$//')"
-    webhook_token_fmt="$(echo "$webhook_token" | sed 's/.\{8\}/&-/g; s/-$//')"
 
     bold "[$((i+1))/${#RELEASES[@]}] $release  →  http://${hostname}"
-    info "API_KEY       = $api_key_fmt"
     info "DB_PASSWORD   = $db_password_fmt"
-    info "WEBHOOK_TOKEN = $webhook_token_fmt"
     info "Updated       = $updated_at"
 
     # Create ArgoCD Application — ArgoCD will run the Helm install/upgrade.
@@ -280,14 +274,10 @@ spec:
           color: "${color}"
           message: |
             Updated:      ${updated_at}
-            API_KEY:      ${api_key_fmt}
             DB_PASSWORD:  ${db_password_fmt}
-            WEBHOOK_TOKEN:${webhook_token_fmt}
         secret:
           data:
-            API_KEY: "${api_key}"
             DB_PASSWORD: "${db_password}"
-            WEBHOOK_TOKEN: "${webhook_token}"
         ingress:
           enabled: true
           className: "${INGRESS_CLASS}"

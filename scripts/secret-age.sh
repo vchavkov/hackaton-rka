@@ -3,26 +3,31 @@
 #
 # Detects secrets created/updated in the demo namespace and alerts if they
 # exceed a configurable age threshold (default: 7 days).
+# With --rotate, finds the oldest secret and rotates it via ArgoCD.
 #
 # Usage:
 #   ./scripts/secret-age.sh [OPTIONS]
 #
 # Options:
-#   --namespace <ns>     Kubernetes namespace (default: demo)
-#   --threshold-days <n> Age threshold in days (default: 7)
-#   --alert-only         Only show secrets exceeding threshold
-#   --json               Output as JSON
-#   --sort-by-age        Sort by age (oldest first)
+#   --namespace <ns>          Kubernetes namespace (default: demo)
+#   --argocd-namespace <ns>   ArgoCD namespace (default: argocd)
+#   --threshold-days <n>      Age threshold in days (default: 7)
+#   --alert-only              Only show secrets exceeding threshold
+#   --json                    Output as JSON
+#   --sort-by-age             Sort by age (oldest first)
+#   --rotate                  Rotate the oldest secret via ArgoCD
 
 set -euo pipefail
 
 # ── config ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="${NAMESPACE:-demo}"
+ARGOCD_NAMESPACE="${ARGOCD_NAMESPACE:-argocd}"
 THRESHOLD_DAYS=7
 ALERT_ONLY=0
 OUTPUT_JSON=0
 SORT_BY_AGE=0
+ROTATE=0
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -78,6 +83,10 @@ parse_args() {
         THRESHOLD_DAYS="$2"
         shift 2
         ;;
+      --argocd-namespace)
+        ARGOCD_NAMESPACE="$2"
+        shift 2
+        ;;
       --alert-only)
         ALERT_ONLY=1
         shift
@@ -88,6 +97,10 @@ parse_args() {
         ;;
       --sort-by-age)
         SORT_BY_AGE=1
+        shift
+        ;;
+      --rotate)
+        ROTATE=1
         shift
         ;;
       -h|--help)
@@ -110,12 +123,14 @@ Usage:
   ./scripts/secret-age.sh [OPTIONS]
 
 Options:
-  --namespace <ns>     Kubernetes namespace (default: demo)
-  --threshold-days <n> Age threshold in days (default: 7)
-  --alert-only         Only show secrets exceeding threshold
-  --json               Output as JSON
-  --sort-by-age        Sort by age (oldest first)
-  -h, --help           Show this help message
+  --namespace <ns>          Kubernetes namespace (default: demo)
+  --argocd-namespace <ns>   ArgoCD namespace (default: argocd)
+  --threshold-days <n>      Age threshold in days (default: 7)
+  --alert-only              Only show secrets exceeding threshold
+  --json                    Output as JSON
+  --sort-by-age             Sort by age (oldest first)
+  --rotate                  Rotate the oldest secret via ArgoCD patch
+  -h, --help                Show this help message
 
 Examples:
   # Check secrets in demo namespace, alert on >7 days old
@@ -129,7 +144,147 @@ Examples:
 
   # Export data for monitoring systems
   ./scripts/secret-age.sh --json --sort-by-age
+
+  # Rotate the oldest secret automatically
+  ./scripts/secret-age.sh --rotate
 EOF
+}
+
+# ── rotate oldest secret ──────────────────────────────────────────────────────
+cmd_rotate() {
+  require_cmd kubectl
+  require_cmd python3
+
+  bold "Finding oldest secret — namespace: $NAMESPACE"
+
+  local now_unix
+  now_unix="$(date +%s)"
+
+  # Fetch secrets managed by the key-rotation-agent chart
+  local secrets_json
+  secrets_json="$(kubectl get secret -n "$NAMESPACE" \
+    -l 'app.kubernetes.io/name=key-rotation-agent' -o json 2>/dev/null)" \
+    || { err "Failed to query secrets in namespace: $NAMESPACE"; exit 1; }
+
+  # Find the oldest secret; emit: name|release|age_seconds|last_ts
+  local oldest
+  oldest="$(printf '%s' "$secrets_json" | NOW_UNIX="$now_unix" python3 - <<'PYEOF'
+import sys, json, os
+from datetime import datetime
+
+now_unix = int(os.environ["NOW_UNIX"])
+data = json.load(sys.stdin)
+
+best = None
+best_age = -1
+
+for item in data.get("items", []):
+    name = item["metadata"]["name"]
+    release = item["metadata"].get("labels", {}).get("app.kubernetes.io/instance", "")
+    if not release:
+        continue
+
+    ts = item["metadata"].get("creationTimestamp", "")
+    for mf in item["metadata"].get("managedFields", []):
+        if mf.get("operation") in ("Update", "Apply") and mf.get("time", "") > ts:
+            ts = mf["time"]
+
+    try:
+        age = now_unix - int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        continue
+
+    if age > best_age:
+        best_age = age
+        best = f"{name}|{release}|{age}|{ts}"
+
+if best:
+    print(best)
+PYEOF
+)"
+
+  if [[ -z "$oldest" ]]; then
+    err "No secrets found with label app.kubernetes.io/name=key-rotation-agent in $NAMESPACE"
+    exit 1
+  fi
+
+  local secret_name release age_secs last_ts
+  IFS='|' read -r secret_name release age_secs last_ts <<< "$oldest"
+
+  info "Oldest secret : $secret_name"
+  info "Release       : $release"
+  info "Age           : $(unix_to_duration "$age_secs") (last updated: ${last_ts:0:19})"
+  echo
+
+  # Fetch current ArgoCD Application to preserve color and ingress settings
+  local app_json
+  app_json="$(kubectl get application "$release" -n "$ARGOCD_NAMESPACE" -o json 2>/dev/null)" \
+    || { err "ArgoCD Application '$release' not found in namespace '$ARGOCD_NAMESPACE'"; exit 1; }
+
+  # Extract preserved fields from current helm values
+  local preserved
+  preserved="$(printf '%s' "$app_json" | python3 - <<'PYEOF'
+import sys, json, re
+
+data = json.load(sys.stdin)
+vals = data["spec"]["source"]["helm"].get("values", "")
+
+def extract(pattern, text, default=""):
+    m = re.search(pattern, text, re.MULTILINE)
+    return m.group(1).strip().strip("\"' ") if m else default
+
+color     = extract(r'^\s+color:\s*["\']?([^"\'\n]+)["\']?', vals, "#000000")
+host      = extract(r'^\s+host:\s*["\']?([^"\'\n]+)["\']?',  vals, "")
+cls       = extract(r'className:\s*["\']?([^"\'\n]+)["\']?',  vals, "nginx")
+
+print(f"{color}|{host}|{cls}")
+PYEOF
+)"
+
+  local color hostname ingress_class
+  IFS='|' read -r color hostname ingress_class <<< "$preserved"
+
+  # Generate new credentials
+  local db_password db_password_fmt updated_at
+  db_password="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+  db_password_fmt="$(printf '%s' "$db_password" | sed 's/.\{8\}/&-/g; s/-$//')"
+  updated_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+  # Build replacement helm values YAML
+  local new_values
+  new_values="$(cat <<YAML
+podinfo:
+  color: "${color}"
+  message: |
+    Updated:      ${updated_at}
+    DB_PASSWORD:  ${db_password_fmt}
+secret:
+  data:
+    DB_PASSWORD: "${db_password}"
+ingress:
+  enabled: true
+  className: "${ingress_class}"
+  hosts:
+    - host: "${hostname}"
+      paths:
+        - path: /
+          pathType: Prefix
+YAML
+)"
+
+  # JSON-encode the values string for the patch payload
+  local values_json
+  values_json="$(printf '%s' "$new_values" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')"
+
+  kubectl patch application "$release" \
+    -n "$ARGOCD_NAMESPACE" \
+    --type=merge \
+    -p "{\"spec\":{\"source\":{\"helm\":{\"values\":${values_json}}}}}"
+
+  echo
+  ok "Rotated: $release"
+  info "New DB_PASSWORD : $db_password_fmt"
+  info "ArgoCD will sync automatically (selfHeal is enabled)"
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────

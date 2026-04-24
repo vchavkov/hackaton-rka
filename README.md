@@ -1,96 +1,166 @@
-# Quick install
+# Key Rotation Agent
 
-# with default (chart-managed) secret
+A Helm-packaged demo of a Kubernetes key/secret rotation workflow, driven by
+ArgoCD and a small set of helper scripts. Each release exposes a podinfo UI
+that reflects the current secret value, so rotations are visible in real time.
+
+---
+
+## Quick install
+
+```bash
+# Default install (chart-managed secret)
 helm install demo ./helm
 
-# point at an existing secret (e.g. from ESO / Vault)
+# Point at an existing secret (e.g. from ESO / Vault)
 helm install demo ./helm \
---set secret.create=false \
---set secret.existingSecret=my-vault-secret
+  --set secret.create=false \
+  --set secret.existingSecret=my-vault-secret
 
-# expose via ingress
+# Expose via ingress
 helm install demo ./helm \
---set ingress.enabled=true \
---set ingress.hosts[0].host=kra.demo.local
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=kra.demo.local
 
-# After install, port-forward to see the secrets reflected in the UI:
-
+# Without ingress, port-forward to view the UI
 kubectl port-forward svc/demo-key-rotation-agent 9898:80
 # open http://localhost:9898
+```
 
+---
 
- Workflow
+## Demo workflow
 
-# 1. deploy — ingress enabled, hostnames set, secrets randomised
-./scripts/demo.sh deploy
+The `scripts/demo.sh` driver wraps the full lifecycle.
 
-# 2. hosts — detect ingress IP, write /etc/hosts (interactive y/N)
-./scripts/demo.sh hosts
-
-# 3. open browser — no port-forward needed
-
-ArgoCD is now fully accessible:
-- 🌐 URL: http://argocd.demo.local
-- 👤 Username: admin
-- 🔑 Password: TnLMdCP8k6xn4F4j
-
-All the KRA demo releases should also be accessible now:
-- http://kra-alpha.demo.local
-- http://kra-beta.demo.local
-- http://kra-gamma.demo.local
-- http://kra-delta.demo.local
-
-
-# 4. show status + URLs in one line
-./scripts/demo.sh status
-
-# 5. clean up everything incl. /etc/hosts (interactive y/N)
-./scripts/demo.sh teardown
-
-How ingress hostnames work
-
-Each release gets its own Ingress object:
-- kra-alpha.demo.local → kra-alpha-key-rotation-agent svc
-- kra-beta.demo.local → kra-beta-key-rotation-agent svc
-- …
-
-IP detection tries 4 strategies in order: ingress object IP → ingress object hostname (AWS) → ingress-nginx controller LB service → minikube/kind node IP.
-
-/etc/hosts is written with start/end markers so teardown can remove it cleanly with sed.
-
-Override defaults
-
-DOMAIN=demo.local INGRESS_CLASS=traefik NAMESPACE=demo ./scripts/demo.sh deploy
-
-
- Run this now to fix the cluster:
-
+```bash
+# 0. Install ingress-nginx (only needed once per cluster)
 ./scripts/demo.sh bootstrap
 
-Root cause: No ingress controller was installed. The ingresses exist but nothing watches them to configure routing — that's why ADDRESS is blank and port 80 is refused.
+# 1. Deploy — ingress enabled, hostnames set, secrets randomised
+./scripts/demo.sh deploy
 
-What bootstrap does:
-1. Detects the cluster type — your node IP (172.18.0.2) and name pattern points to kind, so it applies the kind-specific manifest which uses hostPort bindings (no LoadBalancer needed)
-2. Waits for the controller pod to reach Ready
-3. Prints the endpoint
+# 2. Hosts — detect ingress IP and write /etc/hosts (interactive y/N)
+./scripts/demo.sh hosts
 
-Full workflow after bootstrap:
-./scripts/demo.sh bootstrap   # installs ingress-nginx
-./scripts/demo.sh deploy      # re-deploy (ingresses will now get an ADDRESS)
-./scripts/demo.sh dns         # wildcard DNS → 172.18.0.2
+# 3. Show status + URLs
+./scripts/demo.sh status
 
-Usage examples:
-# Check demo namespace with default 7-day threshold
+# 4. Tear everything down, including /etc/hosts entries (interactive y/N)
+./scripts/demo.sh teardown
+```
+
+### What you get after `deploy` + `hosts`
+
+ArgoCD UI:
+
+- URL:      `http://argocd.demo.local`
+- Username: `admin`
+- Password: printed by `./scripts/demo.sh status`
+
+KRA demo releases:
+
+- `http://kra-alpha.demo.local`
+- `http://kra-beta.demo.local`
+- `http://kra-gamma.demo.local`
+- `http://kra-delta.demo.local`
+
+### How ingress hostnames work
+
+Each release gets its own `Ingress` object:
+
+- `kra-alpha.demo.local` → `kra-alpha-key-rotation-agent` svc
+- `kra-beta.demo.local`  → `kra-beta-key-rotation-agent` svc
+- ...
+
+IP detection tries four strategies in order:
+
+1. Ingress object IP
+2. Ingress object hostname (AWS-style)
+3. `ingress-nginx` controller LoadBalancer service
+4. minikube / kind node IP
+
+`/etc/hosts` is written with start/end markers so `teardown` can remove the
+block cleanly with `sed`.
+
+### Override defaults
+
+```bash
+DOMAIN=demo.local INGRESS_CLASS=traefik NAMESPACE=demo \
+  ./scripts/demo.sh deploy
+```
+
+### Why `bootstrap` is needed
+
+Without an ingress controller the `Ingress` objects exist but nothing routes
+to them — `ADDRESS` stays blank and port 80 is refused.
+
+`bootstrap` does:
+
+1. Detects the cluster type (e.g. `kind` from node IP / name) and applies the
+   matching ingress-nginx manifest. The kind variant uses `hostPort` bindings
+   so no LoadBalancer is required.
+2. Waits for the controller pod to become Ready.
+3. Prints the resulting endpoint.
+
+Typical first-time sequence:
+
+```bash
+./scripts/demo.sh bootstrap   # install ingress-nginx
+./scripts/demo.sh deploy      # ingresses now get an ADDRESS
+./scripts/demo.sh hosts       # wildcard /etc/hosts entries
+```
+
+---
+
+## Secret age monitoring & rotation
+
+`scripts/secret-age.sh` reports the age of every secret in a namespace
+(based on `creationTimestamp` and the latest `managedFields` update) and
+optionally rotates the oldest one through ArgoCD.
+
+### Inspect
+
+```bash
+# Check the demo namespace with the default 7-day threshold
 ./scripts/secret-age.sh
 
-# Only show secrets needing rotation
+# Only show secrets that need rotation
 ./scripts/secret-age.sh --alert-only
 
-# Check another namespace, 30-day threshold
+# Different namespace, 30-day threshold
 ./scripts/secret-age.sh --namespace prod --threshold-days 30
 
-# Export for monitoring systems
+# Machine-readable export for monitoring systems
 ./scripts/secret-age.sh --json --sort-by-age
+```
 
+### Rotate
 
+`--rotate` finds the oldest secret labelled
+`app.kubernetes.io/name=key-rotation-agent`, generates a new `DB_PASSWORD`,
+and patches the matching ArgoCD `Application` so that selfHeal applies the
+new value. Color and ingress settings are preserved.
 
+```bash
+# Rotate the oldest secret automatically
+./scripts/secret-age.sh --rotate
+
+# Use a non-default ArgoCD namespace
+./scripts/secret-age.sh --rotate --argocd-namespace argo-system
+```
+
+### Options
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--namespace <ns>` | `demo` | Kubernetes namespace to inspect |
+| `--argocd-namespace <ns>` | `argocd` | Namespace where ArgoCD `Application`s live |
+| `--threshold-days <n>` | `7` | Age threshold for the alert column |
+| `--alert-only` | off | Hide secrets within the threshold |
+| `--json` | off | Emit JSON instead of a table |
+| `--sort-by-age` | off | Sort oldest first |
+| `--rotate` | off | Rotate the oldest matching secret via ArgoCD |
+| `-h`, `--help` | — | Show built-in help |
+
+Requires `kubectl` and `python3` on `PATH`.

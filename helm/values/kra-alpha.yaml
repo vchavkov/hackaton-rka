@@ -1,0 +1,14 @@
+podinfo:
+  color: "#e91e63"
+secret:
+  data:
+    PASSWORD: "ogilImdxGKQFepsbGregeF1HWM7AQuTU"
+    UPDATED_AT: "2026-04-24 13:18 UTC"
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: "kra-alpha.demo.local"
+      paths:
+        - path: /
+          pathType: Prefix

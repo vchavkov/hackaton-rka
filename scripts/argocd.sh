@@ -162,6 +162,13 @@ cmd_ingress() {
 
   ok "argocd-server set to insecure (HTTP) mode"
 
+  # Set repo poll interval to 60s (default is 3 min) so rotations are picked
+  # up within a minute of the git push.
+  kubectl -n "$ARGOCD_NAMESPACE" patch configmap argocd-cm \
+    --type=merge \
+    -p '{"data":{"timeout.reconciliation":"60s"}}'
+  ok "ArgoCD repo poll interval set to 60s"
+
   # Apply Ingress resource
   kubectl apply -f - <<EOF
 apiVersion: networking.k8s.io/v1
@@ -264,6 +271,71 @@ cmd_degraded() {
   fi
 }
 
+# ── unhealthy apps ────────────────────────────────────────────────────────────
+# Prints all applications whose health is anything other than "Healthy".
+# Covers: Degraded, Progressing (stuck), Missing, Suspended, Unknown.
+cmd_unhealthy() {
+  require_cmd kubectl
+
+  bold "ArgoCD unhealthy applications — namespace: $ARGOCD_NAMESPACE"
+  sep
+
+  if ! kubectl get namespace "$ARGOCD_NAMESPACE" &>/dev/null; then
+    warn "Namespace '$ARGOCD_NAMESPACE' not found — ArgoCD is not installed."
+    return
+  fi
+
+  local all_apps
+  all_apps="$(kubectl -n "$ARGOCD_NAMESPACE" get applications.argoproj.io \
+    -o json 2>/dev/null)" || {
+    err "Failed to list ArgoCD applications."
+    exit 1
+  }
+
+  local count=0
+  printf '\033[1m%-24s %-14s %-12s %s\033[0m\n' "NAME" "HEALTH" "SYNC" "MESSAGE"
+  printf '%s\n' "────────────────────────────────────────────────────────────────────"
+
+  while IFS= read -r line; do
+    local name health sync message
+    name="$(    printf '%s' "$line" | cut -d'|' -f1)"
+    health="$(  printf '%s' "$line" | cut -d'|' -f2)"
+    sync="$(    printf '%s' "$line" | cut -d'|' -f3)"
+    message="$( printf '%s' "$line" | cut -d'|' -f4)"
+
+    [[ "$health" == "Healthy" ]] && continue
+
+    local color
+    case "$health" in
+      Degraded)    color='\033[31m' ;;   # red
+      Progressing) color='\033[33m' ;;   # yellow
+      Missing)     color='\033[35m' ;;   # magenta
+      Suspended)   color='\033[36m' ;;   # cyan
+      *)           color='\033[0m'  ;;   # default
+    esac
+
+    printf "%-24s ${color}%-14s\033[0m %-12s %s\n" \
+      "$name" "$health" "$sync" "${message:0:60}"
+    (( count++ )) || true
+  done < <(printf '%s' "$all_apps" | python3 -c "
+import sys, json
+apps = json.load(sys.stdin).get('items', [])
+for a in apps:
+    name    = a['metadata']['name']
+    health  = a.get('status', {}).get('health', {}).get('status', 'Unknown')
+    sync    = a.get('status', {}).get('sync',   {}).get('status', 'Unknown')
+    message = a.get('status', {}).get('health', {}).get('message', '')
+    print(f'{name}|{health}|{sync}|{message}')
+" 2>/dev/null)
+
+  echo
+  if [[ $count -eq 0 ]]; then
+    ok "All applications are Healthy"
+  else
+    warn "$count unhealthy application(s) found"
+  fi
+}
+
 # ── teardown / uninstall ──────────────────────────────────────────────────────
 cmd_teardown() {
   require_cmd kubectl
@@ -297,10 +369,11 @@ case "${1:-install}" in
   portforward) cmd_portforward  ;;
   status)      cmd_status       ;;
   degraded)    cmd_degraded     ;;
+  unhealthy)   cmd_unhealthy    ;;
   teardown)    cmd_teardown     ;;
   uninstall)   cmd_uninstall    ;;
   *)
-    bold "Usage: $0 [install|ingress|password|portforward|status|degraded|teardown|uninstall]"
+    bold "Usage: $0 [install|ingress|password|portforward|status|degraded|unhealthy|teardown|uninstall]"
     echo
     echo "  install      — deploy ArgoCD, set password, and configure ingress"
     echo "  ingress      — (re-)apply ingress for http://${ARGOCD_HOST}"
@@ -308,6 +381,7 @@ case "${1:-install}" in
     echo "  portforward  — fallback: forward argocd-server to localhost:${ARGOCD_PORT}"
     echo "  status       — show pod and service status"
     echo "  degraded     — list applications with Degraded health status"
+    echo "  unhealthy    — list all applications that are not Healthy"
     echo "  teardown     — remove ArgoCD and its namespace (no confirmation)"
     echo "  uninstall    — same as teardown but asks for confirmation"
     echo

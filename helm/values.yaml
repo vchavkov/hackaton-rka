@@ -1,9 +1,9 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/stefanprodan/podinfo
+  repository: k8s.gcr.io/echoserver
   pullPolicy: IfNotPresent
-  tag: ""  # defaults to Chart.appVersion
+  tag: "1.10"
 
 serviceAccount:
   create: true
@@ -13,7 +13,7 @@ serviceAccount:
 service:
   type: ClusterIP
   port: 80
-  targetPort: 9898
+  targetPort: 8080
 
 ingress:
   enabled: false
@@ -59,11 +59,8 @@ secretMount:
   # Also expose each key as an environment variable
   envVars: true
 
-# podinfo UI / behaviour knobs (passed via env vars)
-podinfo:
-  # Colour shown on the podinfo UI — useful to distinguish rotated vs. not
-  color: "#2196f3"
-  message: "Key Rotation Agent — hackathon demo"
+# echoserver / behaviour knobs (passed as env vars if needed)
+echoserver: {}
 
 podAnnotations: {}
 podSecurityContext:

@@ -72,17 +72,17 @@ Full workflow after bootstrap:
 ./scripts/demo.sh dns         # wildcard DNS → 172.18.0.2
 
 Usage examples:
-  # Check demo namespace with default 7-day threshold
-  ./scripts/secret-age.sh
+# Check demo namespace with default 7-day threshold
+./scripts/secret-age.sh
 
-  # Only show secrets needing rotation
-  ./scripts/secret-age.sh --alert-only
+# Only show secrets needing rotation
+./scripts/secret-age.sh --alert-only
 
-  # Check another namespace, 30-day threshold
-  ./scripts/secret-age.sh --namespace prod --threshold-days 30
+# Check another namespace, 30-day threshold
+./scripts/secret-age.sh --namespace prod --threshold-days 30
 
-  # Export for monitoring systems
-  ./scripts/secret-age.sh --json --sort-by-age
+# Export for monitoring systems
+./scripts/secret-age.sh --json --sort-by-age
 
 
 

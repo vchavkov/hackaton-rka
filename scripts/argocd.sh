@@ -2,7 +2,7 @@
 # install-argocd.sh — install ArgoCD into a Kubernetes cluster
 #
 # Usage:
-#   ./scripts/install-argocd.sh [install|ingress|uninstall|status|password|portforward]
+#   ./scripts/argocd.sh [install|ingress|uninstall|status|password|portforward]
 #
 # Env overrides:
 #   ARGOCD_NAMESPACE  (default: argocd)
@@ -16,7 +16,7 @@ set -euo pipefail
 
 # ── config ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ARGOCD_NAMESPACE="${ARGOCD_NAMESPACE:-demo}"
+ARGOCD_NAMESPACE="${ARGOCD_NAMESPACE:-argocd}"
 ARGOCD_VERSION="${ARGOCD_VERSION:-stable}"
 ARGOCD_PASSWORD="${ARGOCD_PASSWORD:-admin123!}"
 ARGOCD_PORT="${ARGOCD_PORT:-8080}"
@@ -246,8 +246,6 @@ cmd_teardown() {
   # Also remove the ingress we created separately
   kubectl delete ingress argocd-server -n "$ARGOCD_NAMESPACE" --ignore-not-found 2>/dev/null || true
   ok "Resources removed"
-
-  # Do NOT delete the namespace — it is shared with the kra demo releases
   echo
   ok "ArgoCD torn down."
 }

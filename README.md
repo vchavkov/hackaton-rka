@@ -11,7 +11,7 @@ that reflects the current secret value, so rotations are visible in real time.
 - A Kubernetes cluster (`kind`, `minikube`, `k3d` or any cloud cluster)
 - `kubectl` configured against that cluster
 - `helm` 3.x
-- `python3` (used by `scripts/secret-age.sh` for JSON parsing and rotation)
+- `python3` (`scripts/secret-age.py` requires Python 3.7+)
 - `bash` 4+
 
 ---
@@ -47,7 +47,7 @@ The `scripts/` directory contains three drivers:
 | --- | --- |
 | `scripts/demo.sh`       | End-to-end demo lifecycle: bootstrap cluster, deploy 4 releases, manage DNS / hosts, teardown |
 | `scripts/argocd.sh`     | Install and manage ArgoCD itself (separate from app releases) |
-| `scripts/secret-age.sh` | Report secret age, rotate the oldest secret via ArgoCD, or clean up unused / stale secrets |
+| `scripts/secret-age.py` | Report secret age, rotate the oldest secret via ArgoCD, or clean up unused / stale secrets |
 
 All three scripts accept a `-h` / `help` argument and print the usage shown
 below.
@@ -64,10 +64,10 @@ below.
 # 2. rotate — picks the oldest of kra-{alpha,beta,gamma,delta}, generates a
 # new DB_PASSWORD, patches the matching ArgoCD Application, and triggers a
 # rolling restart so pods immediately pick up the new credentials.
-./scripts/secret-age.sh
+./scripts/secret-age.py
 
 # 3. clean up stale Helm release-history secrets that pile up over upgrades
-./scripts/secret-age.sh --cleanup
+./scripts/secret-age.py --cleanup
 
 # 4. tear it all down
 ./scripts/demo.sh teardown
@@ -190,33 +190,29 @@ uninstall).
 
 ---
 
-### `scripts/secret-age.sh`
+### `scripts/secret-age.py`
 
 ```text
-Monitor secret age, rotate the oldest secret, or clean up unused secrets.
-
-Usage:
-  ./scripts/secret-age.sh [OPTIONS]
+usage: ./scripts/secret-age.py [-h] [--namespace NS] [--argocd-namespace NS]
+                               [--threshold-days N] [--alert-only] [--json]
+                               [--sort-by-age] [--rotate | --no-rotate]
+                               [--cleanup] [--include-unreferenced] [--dry-run]
 
 Default action:
-  When --namespace is "demo" (the default), the oldest secret is rotated via
-  ArgoCD. For any other namespace, the script only reports secret ages.
-  Use --rotate / --no-rotate to override this default, or --cleanup to
-  delete unused secrets instead.
+  namespace == "demo"  → rotate the oldest secret via ArgoCD
+  any other namespace  → check & report secret ages
 
 Options:
-  --namespace <ns>          Kubernetes namespace (default: demo)
-  --argocd-namespace <ns>   ArgoCD namespace (default: argocd)
-  --threshold-days <n>      Age threshold in days (default: 7)
-  --alert-only              Only show secrets exceeding threshold
-  --json                    Output as JSON
-  --sort-by-age             Sort by age (oldest first)
+  --namespace, -n NS        Kubernetes namespace (default: demo)
+  --argocd-namespace NS     ArgoCD namespace (default: argocd)
+  --threshold-days N        Age threshold in days for check mode (default: 7)
+  --alert-only              Only show secrets exceeding the threshold
+  --json                    Output check results as JSON
+  --sort-by-age             Sort check results oldest first
   --rotate                  Force rotation of the oldest secret via ArgoCD
-  --no-rotate               Force check-only (skip rotation, even on 'demo')
+  --no-rotate               Force check-only (skip rotation even on 'demo')
   --cleanup                 Delete stale Helm release-history secrets
-  --include-unreferenced    Also delete secrets not referenced by any
-                            pod/controller/SA/Ingress (skips argocd-*,
-                            managed-by/part-of, meta.helm.sh/release-name)
+  --include-unreferenced    With --cleanup: also delete unreferenced secrets
   --dry-run                 With --cleanup: list candidates without deleting
   -h, --help                Show this help message
 ```
@@ -228,7 +224,7 @@ namespace — that is the canonical demo flow:
 
 ```bash
 # Default: rotate the oldest secret in 'demo' via ArgoCD
-./scripts/secret-age.sh
+./scripts/secret-age.py
 ```
 
 For any other namespace the default is check-only, so monitoring tooling and
@@ -236,7 +232,7 @@ ad-hoc inspections never accidentally trigger a rotation:
 
 ```bash
 # Check 'prod' with a 30-day threshold (no rotation)
-./scripts/secret-age.sh --namespace prod --threshold-days 30
+./scripts/secret-age.py --namespace prod --threshold-days 30
 ```
 
 #### Inspect (opt out of rotation)
@@ -246,13 +242,13 @@ behavior:
 
 ```bash
 # Inspect 'demo' without rotating
-./scripts/secret-age.sh --no-rotate
+./scripts/secret-age.py --no-rotate
 
 # Only show secrets that need rotation
-./scripts/secret-age.sh --no-rotate --alert-only
+./scripts/secret-age.py --no-rotate --alert-only
 
 # Machine-readable export for monitoring systems
-./scripts/secret-age.sh --no-rotate --json --sort-by-age
+./scripts/secret-age.py --no-rotate --json --sort-by-age
 ```
 
 #### Rotate (opt in for non-`demo` namespaces)
@@ -264,10 +260,10 @@ new value. Color and ingress settings are preserved.
 
 ```bash
 # Force rotation in a non-default namespace
-./scripts/secret-age.sh --namespace staging --rotate
+./scripts/secret-age.py --namespace staging --rotate
 
 # Use a non-default ArgoCD namespace
-./scripts/secret-age.sh --rotate --argocd-namespace argo-system
+./scripts/secret-age.py --rotate --argocd-namespace argo-system
 ```
 
 The chart's `Deployment` carries a `checksum/secret` pod-template annotation
@@ -303,10 +299,10 @@ the latest revision, so deleting them is always safe.
 
 ```bash
 # Preview what would be deleted
-./scripts/secret-age.sh --cleanup --dry-run
+./scripts/secret-age.py --cleanup --dry-run
 
 # Actually delete stale Helm history
-./scripts/secret-age.sh --cleanup
+./scripts/secret-age.py --cleanup
 ```
 
 Add `--include-unreferenced` to also sweep secrets that no pod, controller
@@ -323,10 +319,10 @@ applied so the control plane isn't accidentally broken:
 
 ```bash
 # Preview the broader sweep
-./scripts/secret-age.sh --cleanup --include-unreferenced --dry-run
+./scripts/secret-age.py --cleanup --include-unreferenced --dry-run
 
 # Apply it
-./scripts/secret-age.sh --cleanup --include-unreferenced
+./scripts/secret-age.py --cleanup --include-unreferenced
 ```
 
 Requires `kubectl` and `python3` on `PATH`.

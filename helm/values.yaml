@@ -50,7 +50,7 @@ secret:
   # In a real rotation workflow these values are replaced by
   # the rotation agent; the chart just seeds the initial state.
   data:
-    DB_PASSWORD: "changeme-initial-db-password"
+    PASSWORD: "changeme-initial-db-password"
 
 # How secrets are consumed by the pod
 secretMount:

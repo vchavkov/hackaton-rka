@@ -47,10 +47,7 @@ spec:
           {{- end }}
           {{- end }}
             - name: PODINFO_UI_MESSAGE
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "key-rotation-agent.secretName" . }}
-                  key: DB_PASSWORD
+              value: "PASSWORD: $(PASSWORD)"
           # ── secret volume mount ────────────────────────────────────
           volumeMounts:
             - name: secret-volume

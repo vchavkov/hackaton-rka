@@ -25,18 +25,14 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: http-echo
+        - name: podinfo
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
-          # Use Kubernetes env-var substitution: $(DB_PASSWORD) is expanded
-          # by the kubelet before the process starts — no shell needed.
-          command: ["/http-echo"]
-          args: ["-listen=:5678", "-text=$(DB_PASSWORD)"]
           ports:
             - name: http
-              containerPort: 5678
+              containerPort: 9898
               protocol: TCP
           # ── secrets exposed as individual env vars ─────────────────
           env:
@@ -50,6 +46,11 @@ spec:
                   key: {{ $key }}
           {{- end }}
           {{- end }}
+            - name: PODINFO_UI_MESSAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "key-rotation-agent.secretName" . }}
+                  key: DB_PASSWORD
           # ── secret volume mount ────────────────────────────────────
           volumeMounts:
             - name: secret-volume
@@ -57,14 +58,14 @@ spec:
               readOnly: true
           livenessProbe:
             httpGet:
-              path: {{ .Values.httpEcho.healthPath }}
+              path: /healthz
               port: http
             initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
             failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           readinessProbe:
             httpGet:
-              path: {{ .Values.httpEcho.healthPath }}
+              path: /readyz
               port: http
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}

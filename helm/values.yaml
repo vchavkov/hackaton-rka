@@ -1,9 +1,9 @@
 replicaCount: 1
 
 image:
-  repository: hashicorp/http-echo
+  repository: ghcr.io/stefanprodan/podinfo
   pullPolicy: IfNotPresent
-  tag: "0.2.3"
+  tag: "6.7.1"
 
 serviceAccount:
   create: true
@@ -13,7 +13,7 @@ serviceAccount:
 service:
   type: ClusterIP
   port: 80
-  targetPort: 5678
+  targetPort: 9898
 
 ingress:
   enabled: false
@@ -62,11 +62,6 @@ secretMount:
 # echoserver / behaviour knobs (passed as env vars if needed)
 echoserver: {}
 
-# http-echo specific settings
-httpEcho:
-  # Health probe path – http-echo returns 200 on every path
-  healthPath: /health
-
 # Probe tuning
 probes:
   liveness:
@@ -79,12 +74,14 @@ probes:
     failureThreshold: 3
 
 podAnnotations: {}
-podSecurityContext: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
 
 containerSecurityContext:
   allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  runAsNonRoot: false
+  readOnlyRootFilesystem: false
   capabilities:
     drop:
       - ALL

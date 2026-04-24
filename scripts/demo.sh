@@ -225,6 +225,11 @@ cmd_deploy() {
     err "Push your repo and try again, or set: git remote add origin <url>"
     exit 1
   fi
+  # Convert SSH remote (git@github.com:org/repo.git) to HTTPS so ArgoCD can
+  # clone without an SSH agent (SSH_AUTH_SOCK is not available inside the pod).
+  if [[ "$git_url" == git@* ]]; then
+    git_url="https://$(echo "$git_url" | sed 's|git@||;s|:|/|')"
+  fi
 
   bold "Deploying ${#RELEASES[@]} releases via ArgoCD"
   info "namespace    : $NAMESPACE"
@@ -251,8 +256,10 @@ cmd_deploy() {
     info "Updated       = $updated_at"
 
     # Create ArgoCD Application — ArgoCD will run the Helm install/upgrade.
-    # ignoreDifferences on the secret checksum annotation prevents OutOfSync/Degraded
-    # every time secrets rotate (the annotation changes on each deploy).
+    # NOTE: We intentionally do NOT add ignoreDifferences for the
+    # `checksum/secret` annotation. That annotation is the chart's mechanism
+    # for triggering a rolling restart when the Secret content changes; if
+    # ArgoCD is told to ignore it, secret rotations no longer roll the pods.
     kubectl apply -f - <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -296,11 +303,6 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
-  ignoreDifferences:
-    - group: apps
-      kind: Deployment
-      jsonPointers:
-        - /spec/template/metadata/annotations/checksum~1secret
 EOF
 
     ok "$release Application created"

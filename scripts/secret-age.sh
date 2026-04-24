@@ -1,21 +1,16 @@
 #!/usr/bin/env bash
-# secret-age.sh — monitor secret age in Kubernetes namespace
+# secret-age.sh — monitor, rotate and clean up Kubernetes secrets
 #
 # Detects secrets created/updated in the demo namespace and alerts if they
 # exceed a configurable age threshold (default: 7 days).
-# With --rotate, finds the oldest secret and rotates it via ArgoCD.
 #
-# Usage:
-#   ./scripts/secret-age.sh [OPTIONS]
+# Default action depends on the namespace:
+#   - namespace == "demo"  → rotate the oldest secret via ArgoCD
+#   - any other namespace  → check & report secret ages
 #
-# Options:
-#   --namespace <ns>          Kubernetes namespace (default: demo)
-#   --argocd-namespace <ns>   ArgoCD namespace (default: argocd)
-#   --threshold-days <n>      Age threshold in days (default: 7)
-#   --alert-only              Only show secrets exceeding threshold
-#   --json                    Output as JSON
-#   --sort-by-age             Sort by age (oldest first)
-#   --rotate                  Rotate the oldest secret via ArgoCD
+# Override with --rotate / --no-rotate, or use --cleanup to delete unused
+# secrets (stale Helm release history + secrets not referenced by any pod,
+# controller, ServiceAccount or Ingress).
 
 set -euo pipefail
 
@@ -27,7 +22,12 @@ THRESHOLD_DAYS=7
 ALERT_ONLY=0
 OUTPUT_JSON=0
 SORT_BY_AGE=0
-ROTATE=0
+# ROTATE: -1 = unset (decide from namespace), 0 = check only, 1 = rotate
+ROTATE=-1
+# ACTION: empty = decide from ROTATE/namespace, "cleanup" = delete unused
+ACTION=""
+DRY_RUN=0
+INCLUDE_UNREFERENCED=0
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -103,6 +103,22 @@ parse_args() {
         ROTATE=1
         shift
         ;;
+      --no-rotate)
+        ROTATE=0
+        shift
+        ;;
+      --cleanup)
+        ACTION="cleanup"
+        shift
+        ;;
+      --include-unreferenced)
+        INCLUDE_UNREFERENCED=1
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
       -h|--help)
         show_help
         exit 0
@@ -122,6 +138,12 @@ Monitor secret age in Kubernetes namespace and alert on old secrets.
 Usage:
   ./scripts/secret-age.sh [OPTIONS]
 
+Default action:
+  When --namespace is "demo" (the default), the oldest secret is rotated via
+  ArgoCD. For any other namespace, the script only reports secret ages.
+  Use --rotate / --no-rotate to override this default, or --cleanup to
+  delete unused secrets instead.
+
 Options:
   --namespace <ns>          Kubernetes namespace (default: demo)
   --argocd-namespace <ns>   ArgoCD namespace (default: argocd)
@@ -129,24 +151,44 @@ Options:
   --alert-only              Only show secrets exceeding threshold
   --json                    Output as JSON
   --sort-by-age             Sort by age (oldest first)
-  --rotate                  Rotate the oldest secret via ArgoCD patch
+  --rotate                  Force rotation of the oldest secret via ArgoCD
+  --no-rotate               Force check-only (skip rotation, even on 'demo')
+  --cleanup                 Delete stale Helm release-history secrets (safe:
+                            Helm only needs the latest revision per release).
+                            Add --include-unreferenced to be more aggressive.
+  --include-unreferenced    With --cleanup: also delete secrets not referenced
+                            by any pod/controller/SA/Ingress, with skip rules
+                            for argocd-* and managed-by/part-of labels.
+  --dry-run                 With --cleanup: list candidates without deleting
   -h, --help                Show this help message
 
 Examples:
-  # Check secrets in demo namespace, alert on >7 days old
+  # Default: rotate the oldest secret in 'demo' via ArgoCD
   ./scripts/secret-age.sh
 
-  # Check demo namespace, alert on >30 days old
-  ./scripts/secret-age.sh --threshold-days 30
+  # Inspect 'demo' without rotating
+  ./scripts/secret-age.sh --no-rotate
+
+  # Check another namespace, 30-day threshold (no rotation by default)
+  ./scripts/secret-age.sh --namespace prod --threshold-days 30
 
   # Only show secrets that need rotation
-  ./scripts/secret-age.sh --threshold-days 7 --alert-only
+  ./scripts/secret-age.sh --no-rotate --alert-only
 
   # Export data for monitoring systems
-  ./scripts/secret-age.sh --json --sort-by-age
+  ./scripts/secret-age.sh --no-rotate --json --sort-by-age
 
-  # Rotate the oldest secret automatically
-  ./scripts/secret-age.sh --rotate
+  # Force rotation in a non-default namespace
+  ./scripts/secret-age.sh --namespace staging --rotate
+
+  # Preview stale Helm history secrets in 'demo' without deleting
+  ./scripts/secret-age.sh --cleanup --dry-run
+
+  # Delete stale Helm history secrets in 'demo'
+  ./scripts/secret-age.sh --cleanup
+
+  # Also include unreferenced secrets (skips argocd-*, managed-by/part-of)
+  ./scripts/secret-age.sh --cleanup --include-unreferenced --dry-run
 EOF
 }
 
@@ -167,13 +209,15 @@ cmd_rotate() {
     || { err "Failed to query secrets in namespace: $NAMESPACE"; exit 1; }
 
   # Find the oldest secret; emit: name|release|age_seconds|last_ts
+  # Pass JSON via env var because `python3 -` reads its script from stdin and
+  # would collide with a piped payload.
   local oldest
-  oldest="$(printf '%s' "$secrets_json" | NOW_UNIX="$now_unix" python3 - <<'PYEOF'
-import sys, json, os
+  oldest="$(SECRETS_JSON="$secrets_json" NOW_UNIX="$now_unix" python3 - <<'PYEOF'
+import os, json
 from datetime import datetime
 
 now_unix = int(os.environ["NOW_UNIX"])
-data = json.load(sys.stdin)
+data = json.loads(os.environ["SECRETS_JSON"])
 
 best = None
 best_age = -1
@@ -223,10 +267,10 @@ PYEOF
 
   # Extract preserved fields from current helm values
   local preserved
-  preserved="$(printf '%s' "$app_json" | python3 - <<'PYEOF'
-import sys, json, re
+  preserved="$(APP_JSON="$app_json" python3 - <<'PYEOF'
+import os, json, re
 
-data = json.load(sys.stdin)
+data = json.loads(os.environ["APP_JSON"])
 vals = data["spec"]["source"]["helm"].get("values", "")
 
 def extract(pattern, text, default=""):
@@ -244,9 +288,11 @@ PYEOF
   local color hostname ingress_class
   IFS='|' read -r color hostname ingress_class <<< "$preserved"
 
-  # Generate new credentials
+  # Generate new credentials. Using python instead of `tr | head` avoids
+  # SIGPIPE killing the pipeline under `set -o pipefail` when head closes
+  # its stdin early.
   local db_password db_password_fmt updated_at
-  db_password="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+  db_password="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(32)))')"
   db_password_fmt="$(printf '%s' "$db_password" | sed 's/.\{8\}/&-/g; s/-$//')"
   updated_at="$(date -u '+%Y-%m-%d %H:%M UTC')"
 
@@ -274,17 +320,226 @@ YAML
 
   # JSON-encode the values string for the patch payload
   local values_json
-  values_json="$(printf '%s' "$new_values" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')"
+  values_json="$(NEW_VALUES="$new_values" python3 -c 'import os,json; print(json.dumps(os.environ["NEW_VALUES"]))')"
 
+  # Patch values AND clear ignoreDifferences in one go.
+  # The Application was deployed with ignoreDifferences on
+  # /spec/template/metadata/annotations/checksum~1secret, which made ArgoCD
+  # treat the chart's `checksum/secret` annotation as in-sync even after the
+  # Secret changed — so the Deployment never got re-applied and pods never
+  # rolled. Setting ignoreDifferences to [] re-enables the chart's built-in
+  # restart-on-secret-change mechanism.
   kubectl patch application "$release" \
     -n "$ARGOCD_NAMESPACE" \
     --type=merge \
-    -p "{\"spec\":{\"source\":{\"helm\":{\"values\":${values_json}}}}}"
+    -p "{\"spec\":{\"source\":{\"helm\":{\"values\":${values_json}}},\"ignoreDifferences\":[]}}"
 
   echo
   ok "Rotated: $release"
   info "New DB_PASSWORD : $db_password_fmt"
-  info "ArgoCD will sync automatically (selfHeal is enabled)"
+  info "ArgoCD will sync; the chart's checksum/secret annotation will trigger a rolling restart"
+
+  # Belt-and-suspenders: explicitly bump the deployment so the rolling
+  # restart kicks off immediately even if ArgoCD takes a few seconds to
+  # observe the diff. ArgoCD's selfHeal will not undo this — the new
+  # checksum annotation will match what the chart re-renders.
+  local deploy_name
+  deploy_name="$(kubectl get deployment -n "$NAMESPACE" \
+    -l "app.kubernetes.io/instance=${release}" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -n "$deploy_name" ]]; then
+    kubectl -n "$NAMESPACE" rollout restart "deployment/${deploy_name}" >/dev/null
+    info "Rolling restart triggered: deployment/${deploy_name}"
+  fi
+}
+
+# ── cleanup unused secrets ────────────────────────────────────────────────────
+# Identifies secrets that are not referenced by any pod, controller pod
+# template, ServiceAccount or Ingress, plus stale Helm release-history
+# secrets (sh.helm.release.v1.<release>.v<N> where N is not the latest
+# revision for that release). Optionally deletes them.
+cmd_cleanup() {
+  require_cmd kubectl
+  require_cmd python3
+
+  bold "Scanning for unused secrets — namespace: $NAMESPACE"
+  if [[ $INCLUDE_UNREFERENCED -eq 1 ]]; then
+    info "Mode: stale Helm history + unreferenced (with controller skip rules)"
+  else
+    info "Mode: stale Helm history only (use --include-unreferenced for more)"
+  fi
+
+  # Discover unused secrets in one python invocation (calls kubectl itself).
+  # Emits one line per candidate as: <name>|<reason>
+  local plan_file
+  plan_file="$(mktemp)"
+  trap "rm -f '$plan_file'" RETURN
+
+  KRA_NAMESPACE="$NAMESPACE" \
+  KRA_INCLUDE_UNREFERENCED="$INCLUDE_UNREFERENCED" \
+  python3 - "$plan_file" <<'PYEOF'
+import os, sys, json, re, subprocess
+
+ns = os.environ["KRA_NAMESPACE"]
+include_unreferenced = os.environ.get("KRA_INCLUDE_UNREFERENCED") == "1"
+
+# Names / prefixes / labels that mark a secret as managed by a controller
+# we shouldn't touch even if no pod references it directly.
+PROTECTED_PREFIXES = ("argocd-",)
+PROTECTED_LABELS = ("app.kubernetes.io/part-of", "app.kubernetes.io/managed-by")
+PROTECTED_ANNOTATIONS = ("meta.helm.sh/release-name",)
+
+def kget(kind):
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "-n", ns, "get", kind, "-o", "json"],
+            stderr=subprocess.DEVNULL,
+        )
+        return json.loads(out).get("items", [])
+    except Exception:
+        return []
+
+secrets = {s["metadata"]["name"]: s for s in kget("secrets")}
+sa_items = kget("serviceaccounts")
+sa_names = {sa["metadata"]["name"] for sa in sa_items}
+
+referenced = set()
+
+def scan_pod_spec(spec):
+    if not spec:
+        return
+    for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+        for env in c.get("env") or []:
+            ref = (env.get("valueFrom") or {}).get("secretKeyRef", {}).get("name")
+            if ref:
+                referenced.add(ref)
+        for ef in c.get("envFrom") or []:
+            ref = (ef.get("secretRef") or {}).get("name")
+            if ref:
+                referenced.add(ref)
+    for v in spec.get("volumes") or []:
+        ref = (v.get("secret") or {}).get("secretName")
+        if ref:
+            referenced.add(ref)
+        for src in (v.get("projected") or {}).get("sources") or []:
+            ref = (src.get("secret") or {}).get("name")
+            if ref:
+                referenced.add(ref)
+    for ips in spec.get("imagePullSecrets") or []:
+        if ips.get("name"):
+            referenced.add(ips["name"])
+
+for p in kget("pods"):
+    scan_pod_spec(p.get("spec"))
+
+for kind in ("deployments", "statefulsets", "daemonsets", "replicasets", "jobs"):
+    for item in kget(kind):
+        scan_pod_spec(((item.get("spec") or {}).get("template") or {}).get("spec"))
+
+for cj in kget("cronjobs"):
+    tmpl = (((cj.get("spec") or {}).get("jobTemplate") or {})
+            .get("spec", {}).get("template", {}).get("spec"))
+    scan_pod_spec(tmpl)
+
+for sa in sa_items:
+    for s in sa.get("secrets") or []:
+        if s.get("name"):
+            referenced.add(s["name"])
+    for s in sa.get("imagePullSecrets") or []:
+        if s.get("name"):
+            referenced.add(s["name"])
+
+for ing in kget("ingresses"):
+    for tls in (ing.get("spec") or {}).get("tls") or []:
+        if tls.get("secretName"):
+            referenced.add(tls["secretName"])
+
+# Helm release history: keep latest revision per release, mark older as stale.
+helm_re = re.compile(r"^sh\.helm\.release\.v1\.(.+)\.v(\d+)$")
+helm_latest, helm_secrets = {}, []
+for name, sec in secrets.items():
+    if sec.get("type") == "helm.sh/release.v1":
+        m = helm_re.match(name)
+        if m:
+            release, ver = m.group(1), int(m.group(2))
+            helm_secrets.append((name, release, ver))
+            if ver > helm_latest.get(release, 0):
+                helm_latest[release] = ver
+helm_stale = {n for n, r, v in helm_secrets if v != helm_latest.get(r)}
+
+candidates = []
+for name, sec in secrets.items():
+    annotations = sec["metadata"].get("annotations") or {}
+    labels = sec["metadata"].get("labels") or {}
+    if annotations.get("helm.sh/resource-policy") == "keep":
+        continue
+
+    # Always-safe deletion: stale helm release history.
+    if name in helm_stale:
+        candidates.append((name, "stale Helm history"))
+        continue
+
+    # Anything beyond Helm history requires explicit opt-in.
+    if not include_unreferenced:
+        continue
+
+    stype = sec.get("type", "")
+    if stype == "helm.sh/release.v1":
+        continue  # latest revision, still tracked
+
+    if stype == "kubernetes.io/service-account-token":
+        sa = annotations.get("kubernetes.io/service-account.name")
+        if sa and sa in sa_names:
+            continue
+        candidates.append((name, "orphaned SA token"))
+        continue
+
+    if name in referenced:
+        continue
+
+    # Skip secrets that look controller-owned even if no pod references them.
+    if any(name.startswith(p) for p in PROTECTED_PREFIXES):
+        continue
+    if any(k in labels for k in PROTECTED_LABELS):
+        continue
+    if any(k in annotations for k in PROTECTED_ANNOTATIONS):
+        continue
+
+    candidates.append((name, f"unreferenced ({stype or 'Opaque'})"))
+
+with open(sys.argv[1], "w") as fh:
+    for name, reason in candidates:
+        fh.write(f"{name}|{reason}\n")
+PYEOF
+
+  local count
+  count="$(wc -l < "$plan_file" | tr -d ' ')"
+
+  if [[ "$count" -eq 0 ]]; then
+    ok "No unused secrets found"
+    return 0
+  fi
+
+  echo
+  printf '\033[1m%-40s %s\033[0m\n' "SECRET" "REASON"
+  printf '%s\n' "──────────────────────────────────────────────────────────────────────"
+  while IFS='|' read -r name reason; do
+    printf '%-40s %s\n' "${name:0:38}" "$reason"
+  done < "$plan_file"
+  echo
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "$count secret(s) would be deleted (dry-run; pass without --dry-run to apply)"
+    return 0
+  fi
+
+  warn "Deleting $count secret(s) from namespace $NAMESPACE"
+  local names
+  names="$(cut -d'|' -f1 "$plan_file" | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  kubectl delete secret -n "$NAMESPACE" $names
+  echo
+  ok "Deleted $count secret(s)"
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -385,9 +640,10 @@ output_table() {
   for data in "${secrets_data[@]}"; do
     IFS='|' read -r name age_seconds age_days ts_to_use exceeds_threshold <<< "$data"
 
-    # Skip if alert-only and doesn't exceed threshold
+    # Skip if alert-only and doesn't exceed threshold.
+    # Use $((...)) form so a pre-increment from 0 doesn't trip `set -e`.
     if [[ $ALERT_ONLY -eq 1 && $exceeds_threshold -eq 0 ]]; then
-      ((ok_count++))
+      ok_count=$((ok_count + 1))
       continue
     fi
 
@@ -397,11 +653,11 @@ output_table() {
     if [[ $exceeds_threshold -eq 1 ]]; then
       printf '%-30s %-12s %-20s \033[31m✗ ROTATE\033[0m\n' \
         "${name:0:28}" "$age_days" "${ts_to_use:0:19}"
-      ((alert_count++))
+      alert_count=$((alert_count + 1))
     else
       printf '%-30s %-12s %-20s \033[32m✓ ok\033[0m\n' \
         "${name:0:28}" "$age_days" "${ts_to_use:0:19}"
-      ((ok_count++))
+      ok_count=$((ok_count + 1))
     fi
   done
 
@@ -444,4 +700,25 @@ output_json() {
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
 parse_args "$@"
-cmd_check_age
+
+# --cleanup is an explicit action and bypasses the rotate/check default.
+if [[ "$ACTION" == "cleanup" ]]; then
+  cmd_cleanup
+  exit 0
+fi
+
+# Resolve default action when --rotate / --no-rotate weren't given:
+# rotate by default for the 'demo' namespace, check-only otherwise.
+if [[ $ROTATE -eq -1 ]]; then
+  if [[ "$NAMESPACE" == "demo" ]]; then
+    ROTATE=1
+  else
+    ROTATE=0
+  fi
+fi
+
+if [[ $ROTATE -eq 1 ]]; then
+  cmd_rotate
+else
+  cmd_check_age
+fi

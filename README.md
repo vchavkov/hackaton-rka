@@ -1,341 +1,179 @@
-# Key Rotation Agent
+# Key Rotation Agent — Hackathon Demo
 
-A Helm-packaged demo of a Kubernetes key/secret rotation workflow, driven by
-ArgoCD and a small set of helper scripts. Each release exposes a podinfo UI
-that reflects the current secret value, so rotations are visible in real time.
+A Kubernetes demo that shows automated secret rotation via ArgoCD. Four Helm releases run the [podinfo](https://github.com/stefanprodan/podinfo) application, each backed by its own Kubernetes Secret. The rotation agent (`secret-age.py`) finds the oldest secret and patches the ArgoCD Application with a fresh password, which triggers a rolling pod restart via the `checksum/secret` annotation on the Deployment.
 
----
+## Architecture
+
+```
+ArgoCD Application (x4)
+  └── Helm chart (./helm)
+        ├── Deployment       — podinfo container, mounts secret as volume + env vars
+        ├── Service          — ClusterIP on port 80 → 9898
+        ├── Ingress          — <release>.demo.local
+        ├── Secret           — PASSWORD + UPDATED_AT (seeded by chart, rotated by agent)
+        └── ServiceAccount
+```
+
+The `checksum/secret` pod annotation is computed at render time from the Secret manifest. When the Secret content changes, the annotation changes, Kubernetes sees a new pod template, and rolls the Deployment — no manual restart needed.
 
 ## Prerequisites
 
-- A Kubernetes cluster (`kind`, `minikube`, `k3d` or any cloud cluster)
-- `kubectl` configured against that cluster
-- `helm` 3.x
-- `python3` (`scripts/secret-age.py` requires Python 3.7+)
-- `bash` 4+
+- `kubectl` connected to a cluster (kind recommended)
+- `helm` v3
+- `argocd` CLI (optional, for manual inspection)
+- Python 3.7+ (for `secret-age.py`)
+- `openssl` (used by `demo.sh deploy` to seed random passwords)
 
----
+## Quick Start
 
-## Quick install
+### 1. Bootstrap (first time only)
 
-```bash
-# Default install (chart-managed secret)
-helm install demo ./helm
-
-# Point at an existing secret (e.g. from ESO / Vault)
-helm install demo ./helm \
-  --set secret.create=false \
-  --set secret.existingSecret=my-vault-secret
-
-# Expose via ingress
-helm install demo ./helm \
-  --set ingress.enabled=true \
-  --set ingress.hosts[0].host=kra.demo.local
-
-# Without ingress, port-forward to view the UI
-kubectl port-forward svc/demo-key-rotation-agent 9898:80
-# open http://localhost:9898
-```
-
----
-
-## Scripts
-
-The `scripts/` directory contains three drivers:
-
-| Script | Purpose |
-| --- | --- |
-| `scripts/demo.sh`       | End-to-end demo lifecycle: bootstrap cluster, deploy 4 releases, manage DNS / hosts, teardown |
-| `scripts/argocd.sh`     | Install and manage ArgoCD itself (separate from app releases) |
-| `scripts/secret-age.sh` | Thin shell wrapper — finds `python3` and delegates to `secret-age.py` |
-| `scripts/secret-age.py` | Report secret age, rotate the oldest secret via ArgoCD, or clean up unused / stale secrets |
-
-All three scripts accept a `-h` / `help` argument and print the usage shown
-below.
-
-### End-to-end demo flow
-
-Both `secret-age.sh` (shell wrapper) and `secret-age.py` (direct Python) accept
-the same arguments. Use whichever is more convenient:
+Install ingress-nginx and MetalLB (auto-detected for kind):
 
 ```bash
-# 1. one-time cluster prep + deploy the 4 KRA releases via ArgoCD
 ./scripts/demo.sh bootstrap
+```
+
+### 2. Deploy
+
+Installs four ArgoCD Applications (`kra-alpha`, `kra-beta`, `kra-gamma`, `kra-delta`) in the `demo` namespace, each with a randomised initial password:
+
+```bash
 ./scripts/demo.sh deploy
-./scripts/demo.sh hosts                     # wildcard /etc/hosts entries
-./scripts/demo.sh status                    # URLs + ArgoCD admin password
+```
 
-# 2. rotate — picks the oldest of kra-{alpha,beta,gamma,delta}, generates a
-# new DB_PASSWORD, patches the matching ArgoCD Application, and triggers a
-# rolling restart so pods immediately pick up the new credentials.
+DNS is configured automatically via dnsmasq if available. To use `/etc/hosts` instead:
+
+```bash
+./scripts/demo.sh hosts
+```
+
+Override defaults with environment variables:
+
+```bash
+DOMAIN=demo.local INGRESS_CLASS=nginx NAMESPACE=demo ./scripts/demo.sh deploy
+```
+
+### 3. Open in browser
+
+```
+http://kra-alpha.demo.local
+http://kra-beta.demo.local
+http://kra-gamma.demo.local
+http://kra-delta.demo.local
+http://argocd.demo.local
+```
+
+Or use port-forwards (no ingress required):
+
+```bash
+./scripts/demo.sh portforward
+# http://localhost:9000  (kra-alpha)
+# http://localhost:9001  (kra-beta)
+# http://localhost:9002  (kra-gamma)
+# http://localhost:9003  (kra-delta)
+```
+
+## Secret Rotation
+
+`scripts/secret-age.py` is the rotation agent. In the `demo` namespace it rotates by default; elsewhere it reports.
+
+```bash
+# Rotate the oldest secret in 'demo' (default behaviour)
 ./scripts/secret-age.sh
 
-# 3. clean up stale Helm release-history secrets that pile up over upgrades
-./scripts/secret-age.sh --cleanup
-
-# 4. tear it all down
-./scripts/demo.sh teardown
-```
-
----
-
-### `scripts/demo.sh`
-
-```text
-Usage: ./scripts/demo.sh [bootstrap|deploy|metallb|dns|debug|hosts|teardown|status|secrets|portforward]
-
-  bootstrap    — install ingress-nginx (kind / minikube / cloud auto-detected)
-  deploy       — install 4 releases (auto-installs MetalLB if needed)
-  metallb      — install MetalLB and assign IP pool for kind clusters
-  dns          — add wildcard address=/demo.local/<ip> to /etc/dnsmasq.conf
-  debug        — diagnose DNS, ingress controller, and HTTP connectivity
-  hosts        — write /etc/hosts entries (alternative to dns)
-  status       — show helm/pod status and URLs
-  secrets      — print secrets for each release with last-update time
-  teardown     — uninstall releases, clean dnsmasq + /etc/hosts
-  portforward  — fallback: forward pods to localhost:9000-9003
-
-Env vars: NAMESPACE  DOMAIN  INGRESS_CLASS  INGRESS_IP  DNSMASQ_CONF
-```
-
-Typical first-time sequence:
-
-```bash
-./scripts/demo.sh bootstrap   # install ingress-nginx
-./scripts/demo.sh deploy      # 4 KRA releases (alpha/beta/gamma/delta)
-./scripts/demo.sh hosts       # /etc/hosts entries (or use `dns` for dnsmasq)
-./scripts/demo.sh status      # URLs + ArgoCD admin password
-./scripts/demo.sh teardown    # clean up everything
-```
-
-After `deploy` + `hosts` the following endpoints become reachable:
-
-- `http://argocd.demo.local`   (admin / password printed by `status`)
-- `http://kra-alpha.demo.local`
-- `http://kra-beta.demo.local`
-- `http://kra-gamma.demo.local`
-- `http://kra-delta.demo.local`
-
-Override defaults via env vars:
-
-```bash
-DOMAIN=demo.local INGRESS_CLASS=traefik NAMESPACE=demo \
-  ./scripts/demo.sh deploy
-```
-
-#### How ingress hostnames work
-
-Each release gets its own `Ingress` object:
-
-- `kra-alpha.demo.local` → `kra-alpha-key-rotation-agent` svc
-- `kra-beta.demo.local`  → `kra-beta-key-rotation-agent` svc
-- ...
-
-IP detection tries four strategies in order:
-
-1. Ingress object IP
-2. Ingress object hostname (AWS-style)
-3. `ingress-nginx` controller LoadBalancer service
-4. minikube / kind node IP
-
-`/etc/hosts` is written with start/end markers so `teardown` can remove the
-block cleanly with `sed`.
-
-#### Why `bootstrap` is needed
-
-Without an ingress controller the `Ingress` objects exist but nothing routes
-to them — `ADDRESS` stays blank and port 80 is refused. `bootstrap` detects
-the cluster type (kind / minikube / cloud), applies the matching
-ingress-nginx manifest (kind variant uses `hostPort` so no LoadBalancer is
-required), waits for the controller pod to become Ready, and prints the
-resulting endpoint.
-
----
-
-### `scripts/argocd.sh`
-
-```text
-Usage: ./scripts/argocd.sh [install|ingress|password|portforward|status|degraded|teardown|uninstall]
-
-  install      — deploy ArgoCD, set password, and configure ingress
-  ingress      — (re-)apply ingress for http://argocd.demo.local
-  password     — (re-)set the admin password on an existing install
-  portforward  — fallback: forward argocd-server to localhost:8080
-  status       — show pod and service status
-  degraded     — list applications with Degraded health status
-  teardown     — remove ArgoCD and its namespace (no confirmation)
-  uninstall    — same as teardown but asks for confirmation
-
-Env vars: ARGOCD_NAMESPACE  ARGOCD_VERSION  ARGOCD_PASSWORD  ARGOCD_PORT
-          DOMAIN (default: demo.local)  INGRESS_CLASS (default: nginx)
-```
-
-Examples:
-
-```bash
-# Fresh ArgoCD install with a custom admin password
-ARGOCD_PASSWORD='S3cret!' ./scripts/argocd.sh install
-
-# Reset password on an existing install
-ARGOCD_PASSWORD='newpass' ./scripts/argocd.sh password
-
-# Port-forward fallback when ingress isn't available
-./scripts/argocd.sh portforward
-# open https://localhost:8080
-
-# Quickly see what is currently broken
-./scripts/argocd.sh degraded
-```
-
-`scripts/demo.sh deploy` calls `argocd.sh install` internally, so you only
-need this script directly when managing ArgoCD outside the demo flow (e.g.
-rotating the admin password, debugging a Degraded app, or doing a clean
-uninstall).
-
----
-
-### `scripts/secret-age.py`
-
-```text
-usage: ./scripts/secret-age.sh [-h] [--namespace NAMESPACE]
-                               [--argocd-namespace ARGOCD_NAMESPACE]
-                               [--threshold-days THRESHOLD_DAYS]
-                               [--alert-only] [--json] [--sort-by-age]
-                               [--rotate | --no-rotate] [--cleanup]
-                               [--include-unreferenced] [--dry-run]
-
-Monitor secret age, rotate the oldest secret, or clean up unused secrets.
-
-Default action:
-  namespace == "demo"  → rotate the oldest secret via ArgoCD
-  any other namespace  → check & report secret ages
-
-Use --rotate / --no-rotate to override, or --cleanup for housekeeping.
-
-options:
-  --namespace NAMESPACE, -n NAMESPACE
-                        Kubernetes namespace (default: demo)
-  --argocd-namespace ARGOCD_NAMESPACE
-                        ArgoCD namespace (default: argocd)
-  --threshold-days THRESHOLD_DAYS
-                        Age threshold in days for check mode (default: 7)
-  --alert-only          Only show secrets exceeding the threshold
-  --json                Output check results as JSON
-  --sort-by-age         Sort check results oldest first
-  --rotate              Force rotation of the oldest secret via ArgoCD
-  --no-rotate           Force check-only (skip rotation even on 'demo')
-  --cleanup             Delete stale Helm release-history secrets
-  --include-unreferenced
-                        With --cleanup: also delete secrets not referenced by
-                        any pod/controller/SA/Ingress
-  --dry-run             With --cleanup: list candidates without deleting
-  -h, --help            show this help message and exit
-```
-
-#### Default behavior
-
-Running the script with no arguments rotates the oldest secret in the `demo`
-namespace — that is the canonical demo flow:
-
-```bash
-# Default: rotate the oldest secret in 'demo' via ArgoCD
-./scripts/secret-age.sh
-```
-
-For any other namespace the default is check-only, so monitoring tooling and
-ad-hoc inspections never accidentally trigger a rotation:
-
-```bash
-# Check 'prod' with a 30-day threshold (no rotation)
-./scripts/secret-age.sh --namespace prod --threshold-days 30
-```
-
-#### Inspect (opt out of rotation)
-
-Pass `--no-rotate` (or any non-`demo` namespace) to get the report-only
-behavior:
-
-```bash
-# Inspect 'demo' without rotating
+# Check ages without rotating
 ./scripts/secret-age.sh --no-rotate
 
-# Only show secrets that need rotation
+# Only show secrets that need rotation (threshold: 7 days)
 ./scripts/secret-age.sh --no-rotate --alert-only
 
-# Machine-readable export for monitoring systems
+# Check a different namespace with a custom threshold
+./scripts/secret-age.sh --namespace prod --threshold-days 30
+
+# Machine-readable output for monitoring systems
 ./scripts/secret-age.sh --no-rotate --json --sort-by-age
-```
 
-#### Rotate (opt in for non-`demo` namespaces)
-
-`--rotate` finds the oldest secret labelled
-`app.kubernetes.io/name=key-rotation-agent`, generates a new `DB_PASSWORD`,
-and patches the matching ArgoCD `Application` so that selfHeal applies the
-new value. Color and ingress settings are preserved.
-
-```bash
 # Force rotation in a non-default namespace
 ./scripts/secret-age.sh --namespace staging --rotate
 
-# Use a non-default ArgoCD namespace
-./scripts/secret-age.sh --rotate --argocd-namespace argo-system
-```
-
-The chart's `Deployment` carries a `checksum/secret` pod-template annotation
-that hashes the rendered `Secret`. When the Secret content changes, the hash
-changes, the pod template hash changes, and Kubernetes performs a rolling
-restart so the pods pick up the new credentials. To make this work reliably
-the rotate command does three things:
-
-1. Patches `spec.source.helm.values` on the ArgoCD `Application` with the
-   new `DB_PASSWORD`.
-2. Clears `spec.ignoreDifferences` on the `Application` (an earlier version
-   of `demo.sh` told ArgoCD to ignore the very `checksum/secret` annotation
-   that's supposed to trigger the restart, which silently broke rotations).
-3. Issues a `kubectl rollout restart` on the matching `Deployment` as a
-   belt-and-suspenders trigger so the new pod starts immediately rather
-   than waiting for the next ArgoCD sync.
-
-Verifying a rotation actually rolled the pods:
-
-```bash
-kubectl -n demo get pods -l app.kubernetes.io/instance=kra-alpha
-kubectl -n demo get deploy kra-alpha-key-rotation-agent \
-  -o jsonpath='{.spec.template.metadata.annotations.checksum/secret}{"\n"}'
-```
-
-#### Cleanup unused secrets
-
-`--cleanup` removes secrets that aren't doing anything useful. The default
-mode is conservative — it only deletes **stale Helm release history** (the
-`sh.helm.release.v1.<release>.v<N>` secrets where `N` is not the latest
-revision per release). These are pure rollback metadata; Helm only ever reads
-the latest revision, so deleting them is always safe.
-
-```bash
-# Preview what would be deleted
+# Preview stale Helm release-history secrets
 ./scripts/secret-age.sh --cleanup --dry-run
 
-# Actually delete stale Helm history
+# Delete stale Helm release-history secrets
 ./scripts/secret-age.sh --cleanup
+
+# Also sweep unreferenced secrets (skips argocd-* and managed secrets)
+./scripts/secret-age.sh --cleanup --include-unreferenced --dry-run
 ```
 
-Add `--include-unreferenced` to also sweep secrets that no pod, controller
-pod template, ServiceAccount or Ingress references. Several skip rules are
-applied so the control plane isn't accidentally broken:
+Rotation flow:
+1. Finds the secret with the oldest `managedFields` update timestamp.
+2. Patches the ArgoCD Application's Helm values with a new `PASSWORD` and `UPDATED_AT`.
+3. ArgoCD syncs → Helm re-renders → `checksum/secret` annotation changes → Deployment rolls.
+4. Issues an explicit `kubectl rollout restart` as a belt-and-suspenders fallback.
 
-- Names starting with `argocd-` (ArgoCD reads several of these via the
-  Kubernetes API rather than env/volumes, so the reference scan misses them).
-- Secrets with an `app.kubernetes.io/part-of` or
-  `app.kubernetes.io/managed-by` label.
-- Secrets with a `meta.helm.sh/release-name` annotation.
-- Secrets annotated `helm.sh/resource-policy: keep`.
-- ServiceAccount tokens whose owning ServiceAccount still exists.
+## demo.sh Reference
 
 ```bash
-# Preview the broader sweep
-./scripts/secret-age.sh --cleanup --include-unreferenced --dry-run
-
-# Apply it
-./scripts/secret-age.sh --cleanup --include-unreferenced
+./scripts/demo.sh <command>
 ```
+
+| Command | Description |
+|---|---|
+| `bootstrap` | Install ingress-nginx (auto-detects kind / minikube / cloud) |
+| `deploy` | Create/update 4 ArgoCD Applications with random secrets |
+| `metallb` | Install MetalLB and configure an IP pool for kind clusters |
+| `dns` | Add wildcard `address=/<domain>/<ip>` to dnsmasq |
+| `hosts` | Write `/etc/hosts` entries (alternative to dns) |
+| `status` | Show ArgoCD sync/health, pod status, and URLs |
+| `secrets` | Print decoded secret values and last-update time for each release |
+| `portforward` | Forward all four services to `localhost:9000-9003` |
+| `debug` | Diagnose DNS, ingress controller, and HTTP connectivity |
+| `teardown` | Delete ArgoCD Applications and clean dnsmasq / `/etc/hosts` |
+
+Environment variable overrides:
+
+| Variable | Default | Description |
+|---|---|---|
+| `NAMESPACE` | `demo` | Kubernetes namespace |
+| `DOMAIN` | `demo.local` | Ingress hostname domain |
+| `INGRESS_CLASS` | `nginx` | Ingress class name |
+| `INGRESS_IP` | auto-detected | Override ingress IP for dns/hosts commands |
+| `DNSMASQ_CONF` | `/etc/dnsmasq.conf` | Path to dnsmasq config |
+| `ARGOCD_NAMESPACE` | `argocd` | ArgoCD namespace |
+
+## Helm Chart Reference
+
+Chart: `./helm` — `key-rotation-agent` v0.1.0, appVersion `6.7.0`
+
+Key `values.yaml` options:
+
+| Key | Default | Description |
+|---|---|---|
+| `image.repository` | `ghcr.io/stefanprodan/podinfo` | Container image |
+| `image.tag` | chart appVersion | Image tag |
+| `replicaCount` | `1` | Number of pod replicas |
+| `secret.create` | `true` | Let the chart create the Secret |
+| `secret.existingSecret` | `""` | Reference a pre-existing Secret instead |
+| `secret.data` | `{PASSWORD: ...}` | Key/value pairs written into the Secret |
+| `secretMount.volumePath` | `/etc/secrets` | Mount path for the secret volume |
+| `secretMount.envVars` | `true` | Also expose each key as an env var |
+| `ingress.enabled` | `false` | Enable the Ingress object |
+| `ingress.className` | `""` | Ingress class |
+
+To point at an existing secret (e.g. from External Secrets Operator or Vault):
+
+```bash
+helm install demo ./helm \
+  --set secret.create=false \
+  --set secret.existingSecret=my-vault-secret
+```
+
+## Teardown
+
+```bash
+./scripts/demo.sh teardown
+```
+
+Removes all four ArgoCD Applications (and the resources they manage via finalizers), then optionally cleans up dnsmasq and `/etc/hosts` entries.

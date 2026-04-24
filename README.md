@@ -108,10 +108,31 @@ Or use port-forwards (no ingress required):
 ```
 
 Rotation flow:
-1. Finds the secret with the oldest `managedFields` update timestamp.
+1. Finds the secret with the oldest `kra/rotated-at` annotation (falls back to `managedFields` for secrets that have never been rotated), ensuring each release is rotated in round-robin order.
 2. Patches the ArgoCD Application's Helm values with a new `PASSWORD` and `UPDATED_AT`.
-3. ArgoCD syncs → Helm re-renders → `checksum/secret` annotation changes → Deployment rolls.
-4. Issues an explicit `kubectl rollout restart` as a belt-and-suspenders fallback.
+3. Stamps `kra/rotated-at=<now>` directly on the Secret so future runs compare ages correctly (the Secret has `helm.sh/resource-policy: keep`, so Helm never re-applies it and `managedFields` stays frozen at deploy time).
+4. ArgoCD syncs → Helm re-renders → `checksum/secret` annotation changes → Deployment rolls.
+5. Issues an explicit `kubectl rollout restart` as a belt-and-suspenders fallback.
+
+## secret-age.py Reference
+
+`scripts/secret-age.py` is the rotation agent, invoked via the `scripts/secret-age.sh` wrapper.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--namespace`, `-n` | `demo` | Kubernetes namespace |
+| `--argocd-namespace` | `argocd` | Namespace where ArgoCD Applications live |
+| `--threshold-days` | `7` | Age threshold in days for check/alert mode |
+| `--alert-only` | off | Only show secrets exceeding the threshold |
+| `--json` | off | Output check results as JSON |
+| `--sort-by-age` | off | Sort check results oldest first |
+| `--rotate` | off | Force rotation (default for `demo` namespace) |
+| `--no-rotate` | off | Force check-only (overrides `demo` default) |
+| `--cleanup` | off | Delete stale Helm release-history secrets |
+| `--include-unreferenced` | off | With `--cleanup`: also delete unreferenced secrets |
+| `--dry-run` | off | With `--cleanup`: list candidates without deleting |
+
+Environment variable overrides: `NAMESPACE`, `ARGOCD_NAMESPACE`.
 
 ## demo.sh Reference
 
@@ -170,6 +191,37 @@ helm install demo ./helm \
   --set secret.existingSecret=my-vault-secret
 ```
 
+## argocd.sh Reference
+
+`scripts/argocd.sh` installs and manages the ArgoCD control plane itself (separate from the demo applications managed by `demo.sh`).
+
+```bash
+./scripts/argocd.sh <command>
+```
+
+| Command | Description |
+|---|---|
+| `install` | Deploy ArgoCD, set admin password, and configure ingress (default) |
+| `ingress` | (Re-)apply the ingress for `http://argocd.<domain>` |
+| `password` | (Re-)set the admin password on an existing install |
+| `portforward` | Forward `argocd-server` to `localhost:8080` (fallback, no ingress needed) |
+| `status` | Show ArgoCD pod and service status |
+| `degraded` | List applications with `Degraded` health status |
+| `unhealthy` | List all applications that are not `Healthy` (Degraded, Progressing, Missing, Suspended, Unknown) |
+| `teardown` | Remove ArgoCD manifests and ingress (no confirmation prompt) |
+| `uninstall` | Same as `teardown` but asks for confirmation |
+
+Environment variable overrides:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ARGOCD_NAMESPACE` | `argocd` | Namespace where ArgoCD is installed |
+| `ARGOCD_VERSION` | `stable` | ArgoCD manifest version tag |
+| `ARGOCD_PASSWORD` | `admin123!` | Admin password to set on install |
+| `ARGOCD_PORT` | `8080` | Local port used by `portforward` |
+| `DOMAIN` | `demo.local` | Ingress hostname domain (matches `demo.sh`) |
+| `INGRESS_CLASS` | `nginx` | Ingress class (matches `demo.sh`) |
+
 ## Teardown
 
 ```bash
@@ -177,3 +229,9 @@ helm install demo ./helm \
 ```
 
 Removes all four ArgoCD Applications (and the resources they manage via finalizers), then optionally cleans up dnsmasq and `/etc/hosts` entries.
+
+To also remove the ArgoCD control plane itself:
+
+```bash
+./scripts/argocd.sh uninstall
+```

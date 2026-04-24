@@ -197,7 +197,7 @@ uninstall).
 ### `scripts/secret-age.py`
 
 ```text
-usage: ./scripts/secret-age.py [-h] [--namespace NAMESPACE]
+usage: ./scripts/secret-age.sh [-h] [--namespace NAMESPACE]
                                [--argocd-namespace ARGOCD_NAMESPACE]
                                [--threshold-days THRESHOLD_DAYS]
                                [--alert-only] [--json] [--sort-by-age]
@@ -239,7 +239,7 @@ namespace — that is the canonical demo flow:
 
 ```bash
 # Default: rotate the oldest secret in 'demo' via ArgoCD
-./scripts/secret-age.py
+./scripts/secret-age.sh
 ```
 
 For any other namespace the default is check-only, so monitoring tooling and
@@ -247,7 +247,7 @@ ad-hoc inspections never accidentally trigger a rotation:
 
 ```bash
 # Check 'prod' with a 30-day threshold (no rotation)
-./scripts/secret-age.py --namespace prod --threshold-days 30
+./scripts/secret-age.sh --namespace prod --threshold-days 30
 ```
 
 #### Inspect (opt out of rotation)
@@ -257,13 +257,13 @@ behavior:
 
 ```bash
 # Inspect 'demo' without rotating
-./scripts/secret-age.py --no-rotate
+./scripts/secret-age.sh --no-rotate
 
 # Only show secrets that need rotation
-./scripts/secret-age.py --no-rotate --alert-only
+./scripts/secret-age.sh --no-rotate --alert-only
 
 # Machine-readable export for monitoring systems
-./scripts/secret-age.py --no-rotate --json --sort-by-age
+./scripts/secret-age.sh --no-rotate --json --sort-by-age
 ```
 
 #### Rotate (opt in for non-`demo` namespaces)
@@ -275,10 +275,10 @@ new value. Color and ingress settings are preserved.
 
 ```bash
 # Force rotation in a non-default namespace
-./scripts/secret-age.py --namespace staging --rotate
+./scripts/secret-age.sh --namespace staging --rotate
 
 # Use a non-default ArgoCD namespace
-./scripts/secret-age.py --rotate --argocd-namespace argo-system
+./scripts/secret-age.sh --rotate --argocd-namespace argo-system
 ```
 
 The chart's `Deployment` carries a `checksum/secret` pod-template annotation
@@ -314,10 +314,10 @@ the latest revision, so deleting them is always safe.
 
 ```bash
 # Preview what would be deleted
-./scripts/secret-age.py --cleanup --dry-run
+./scripts/secret-age.sh --cleanup --dry-run
 
 # Actually delete stale Helm history
-./scripts/secret-age.py --cleanup
+./scripts/secret-age.sh --cleanup
 ```
 
 Add `--include-unreferenced` to also sweep secrets that no pod, controller
@@ -334,8 +334,8 @@ applied so the control plane isn't accidentally broken:
 
 ```bash
 # Preview the broader sweep
-./scripts/secret-age.py --cleanup --include-unreferenced --dry-run
+./scripts/secret-age.sh --cleanup --include-unreferenced --dry-run
 
 # Apply it
-./scripts/secret-age.py --cleanup --include-unreferenced
+./scripts/secret-age.sh --cleanup --include-unreferenced
 ```

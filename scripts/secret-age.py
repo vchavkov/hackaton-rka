@@ -98,9 +98,15 @@ def human_duration(seconds: int) -> str:
 
 def cmd_check(ns: str, threshold_days: int, alert_only: bool,
               output_json: bool, sort_by_age: bool) -> None:
-    items = kget_json(ns, "secrets")
+    all_items = kget_json(ns, "secrets")
+    # Only report on KRA-managed credential secrets, not Helm history,
+    # ArgoCD internals, or other noise in the namespace.
+    items = [
+        i for i in all_items
+        if i["metadata"].get("labels", {}).get("app.kubernetes.io/name") == "key-rotation-agent"
+    ]
     if not items:
-        warn(f"No secrets found in namespace: {ns}")
+        warn(f"No key-rotation-agent secrets found in namespace: {ns}")
         sys.exit(1)
 
     now = datetime.now(tz=timezone.utc)
@@ -132,7 +138,7 @@ def cmd_check(ns: str, threshold_days: int, alert_only: bool,
 def _output_table(ns: str, threshold_days: int, rows: list[dict],
                   alert_only: bool) -> None:
     print(bold(f"Secret Age Report — namespace: {ns}"))
-    print(f"  Threshold: {threshold_days} days  |  Total secrets: {len(rows)}")
+    print(f"  Threshold: {threshold_days} days  |  KRA secrets: {len(rows)}")
     print()
     print(bold(f"{'SECRET':<30} {'AGE (DAYS)':<12} {'LAST UPDATE':<20} STATUS"))
     print("─" * 70)

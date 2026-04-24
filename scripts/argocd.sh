@@ -2,7 +2,7 @@
 # install-argocd.sh — install ArgoCD into a Kubernetes cluster
 #
 # Usage:
-#   ./scripts/argocd.sh [install|ingress|uninstall|status|password|portforward]
+#   ./scripts/argocd.sh [install|ingress|uninstall|status|degraded|password|portforward]
 #
 # Env overrides:
 #   ARGOCD_NAMESPACE  (default: argocd)
@@ -234,6 +234,36 @@ cmd_status() {
   echo
 }
 
+# ── degraded apps ─────────────────────────────────────────────────────────────
+cmd_degraded() {
+  require_cmd kubectl
+
+  bold "ArgoCD degraded applications — namespace: $ARGOCD_NAMESPACE"
+  sep
+
+  if ! kubectl get namespace "$ARGOCD_NAMESPACE" &>/dev/null; then
+    warn "Namespace '$ARGOCD_NAMESPACE' not found — ArgoCD is not installed."
+    return
+  fi
+
+  kubectl -n "$ARGOCD_NAMESPACE" get applications.argoproj.io \
+    --field-selector=status.health.status=Degraded \
+    -o custom-columns='NAME:.metadata.name,STATUS:.status.operationState.phase,HEALTH:.status.health.status,SYNC:.status.sync.status' \
+    2>/dev/null || kubectl -n "$ARGOCD_NAMESPACE" get applications.argoproj.io \
+    --field-selector=status.health.status=Degraded
+
+  local count
+  count=$(kubectl -n "$ARGOCD_NAMESPACE" get applications.argoproj.io \
+    --field-selector=status.health.status=Degraded \
+    --no-headers 2>/dev/null | wc -l)
+
+  if [[ $count -eq 0 ]]; then
+    ok "No degraded applications found"
+  else
+    warn "Found $count degraded application(s)"
+  fi
+}
+
 # ── teardown / uninstall ──────────────────────────────────────────────────────
 cmd_teardown() {
   require_cmd kubectl
@@ -266,16 +296,18 @@ case "${1:-install}" in
   password)    cmd_set_password ;;
   portforward) cmd_portforward  ;;
   status)      cmd_status       ;;
+  degraded)    cmd_degraded     ;;
   teardown)    cmd_teardown     ;;
   uninstall)   cmd_uninstall    ;;
   *)
-    bold "Usage: $0 [install|ingress|password|portforward|status|teardown|uninstall]"
+    bold "Usage: $0 [install|ingress|password|portforward|status|degraded|teardown|uninstall]"
     echo
     echo "  install      — deploy ArgoCD, set password, and configure ingress"
     echo "  ingress      — (re-)apply ingress for http://${ARGOCD_HOST}"
     echo "  password     — (re-)set the admin password on an existing install"
     echo "  portforward  — fallback: forward argocd-server to localhost:${ARGOCD_PORT}"
     echo "  status       — show pod and service status"
+    echo "  degraded     — list applications with Degraded health status"
     echo "  teardown     — remove ArgoCD and its namespace (no confirmation)"
     echo "  uninstall    — same as teardown but asks for confirmation"
     echo

@@ -22,7 +22,7 @@ INGRESS_CLASS="${INGRESS_CLASS:-nginx}"
 RELEASES=(kra-alpha kra-beta kra-gamma kra-delta)
 COLORS=("#e91e63" "#4caf50" "#ff9800" "#9c27b0")
 
-ARGOCD_NAMESPACE="${ARGOCD_NAMESPACE:-demo}"
+ARGOCD_NAMESPACE="${ARGOCD_NAMESPACE:-argocd}"
 HOSTS_MARKER_START="# kra-demo-start managed by demo.sh"
 HOSTS_MARKER_END="# kra-demo-end"
 DNSMASQ_CONF="${DNSMASQ_CONF:-/etc/dnsmasq.conf}"

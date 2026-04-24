@@ -1,6 +1,6 @@
 # Key Rotation Agent — Hackathon Demo
 
-A Kubernetes demo that shows automated secret rotation via ArgoCD. Four Helm releases run the [podinfo](https://github.com/stefanprodan/podinfo) application, each backed by its own Kubernetes Secret. The rotation agent (`secret-age.py`) finds the oldest secret and patches the ArgoCD Application with a fresh password, which triggers a rolling pod restart via the `checksum/secret` annotation on the Deployment.
+A Kubernetes demo that shows GitOps-native automated secret rotation via ArgoCD. Four Helm releases run the [podinfo](https://github.com/stefanprodan/podinfo) application, each backed by its own Kubernetes Secret. The rotation agent (`secret-age.py`) finds the oldest secret, writes a fresh password to `helm/values/<release>.yaml`, commits and pushes to Git. ArgoCD detects the commit within 60 seconds, syncs, and the `checksum/secret` annotation on the Deployment triggers a rolling pod restart — no in-cluster patching required.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ The `checksum/secret` pod annotation is computed at render time from the Secret 
 - `kubectl` connected to a cluster (kind recommended)
 - `helm` v3
 - `argocd` CLI (optional, for manual inspection)
-- Python 3.7+ (for `secret-age.py` and `argocd-health.py`)
+- Python 3.7+ with `pyyaml` (`pip install -r requirements.txt`) for `secret-age.py` and `argocd-health.py`
 - `openssl` (used by `demo.sh deploy` to seed random passwords)
 
 ## Scripts
@@ -120,11 +120,12 @@ Or use port-forwards (no ingress required):
 
 Rotation flow:
 1. Finds the secret with the oldest `kra/rotated-at` annotation (falls back to `managedFields` for secrets that have never been rotated), ensuring each release is rotated in round-robin order.
-2. Reads the current `helm/values/<release>.yaml` file from the Git repo to preserve color and ingress settings.
+2. Reads `helm/values/<release>.yaml` from the Git repo to preserve color and ingress settings.
 3. Generates a new 32-character random password and writes it to `helm/values/<release>.yaml`.
 4. Runs `git commit` + `git push` with a `chore(rotation): rotate password for <release>` message.
-5. ArgoCD detects the new commit, syncs, Helm re-renders the `checksum/secret` annotation on the Deployment → pods roll automatically.
-6. Stamps `kra/rotated-at=<now>` on the Secret so future runs compare ages correctly (the Secret has `helm.sh/resource-policy: keep`, so ArgoCD never re-applies it and `managedFields` stays frozen at initial deploy time).
+5. ArgoCD polls Git every **60 seconds** (`timeout.reconciliation: 60s`), detects the new commit, syncs, and Helm re-renders the `checksum/secret` annotation → pods roll automatically.
+6. The script waits up to 120 seconds for the ArgoCD Application to return `Healthy + Synced` and reports the result.
+7. Stamps `kra/rotated-at=<now>` on the Secret so future runs compare ages correctly (the Secret has `helm.sh/resource-policy: keep`, so ArgoCD never re-applies it and `managedFields` stays frozen at initial deploy time).
 
 > **Why Git and not in-cluster patching?**  
 > ArgoCD has `selfHeal: true`, so any in-cluster change that diverges from Git gets reverted on the next reconcile cycle. Writing the password to a file in Git is the only change that is guaranteed to survive — and it also gives a full audit trail of every rotation as a git log.
@@ -267,6 +268,8 @@ Environment variable overrides:
 | `ARGOCD_PORT` | `8080` | Local port used by `portforward` |
 | `DOMAIN` | `demo.local` | Ingress hostname domain (matches `demo.sh`) |
 | `INGRESS_CLASS` | `nginx` | Ingress class (matches `demo.sh`) |
+
+`argocd.sh install` also patches `argocd-cm` with `timeout.reconciliation: 60s` so ArgoCD polls Git every minute and picks up rotation commits quickly.
 
 ## Teardown
 

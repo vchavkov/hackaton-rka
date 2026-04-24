@@ -47,12 +47,16 @@ The `scripts/` directory contains three drivers:
 | --- | --- |
 | `scripts/demo.sh`       | End-to-end demo lifecycle: bootstrap cluster, deploy 4 releases, manage DNS / hosts, teardown |
 | `scripts/argocd.sh`     | Install and manage ArgoCD itself (separate from app releases) |
+| `scripts/secret-age.sh` | Thin shell wrapper — finds `python3` and delegates to `secret-age.py` |
 | `scripts/secret-age.py` | Report secret age, rotate the oldest secret via ArgoCD, or clean up unused / stale secrets |
 
 All three scripts accept a `-h` / `help` argument and print the usage shown
 below.
 
 ### End-to-end demo flow
+
+Both `secret-age.sh` (shell wrapper) and `secret-age.py` (direct Python) accept
+the same arguments. Use whichever is more convenient:
 
 ```bash
 # 1. one-time cluster prep + deploy the 4 KRA releases via ArgoCD
@@ -64,10 +68,10 @@ below.
 # 2. rotate — picks the oldest of kra-{alpha,beta,gamma,delta}, generates a
 # new DB_PASSWORD, patches the matching ArgoCD Application, and triggers a
 # rolling restart so pods immediately pick up the new credentials.
-./scripts/secret-age.py
+./scripts/secret-age.sh
 
 # 3. clean up stale Helm release-history secrets that pile up over upgrades
-./scripts/secret-age.py --cleanup
+./scripts/secret-age.sh --cleanup
 
 # 4. tear it all down
 ./scripts/demo.sh teardown

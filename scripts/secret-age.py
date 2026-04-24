@@ -73,7 +73,20 @@ def parse_ts(ts: str) -> Optional[datetime]:
 
 
 def latest_ts(item: dict) -> Optional[datetime]:
-    """Return the most recent timestamp seen in creationTimestamp or managedFields."""
+    """Return the most recent timestamp for a secret.
+
+    Preference order:
+      1. kra/rotated-at annotation — written by cmd_rotate after each rotation,
+         reliably tracks when we last changed the secret value.
+      2. managedFields — fallback for secrets that have never been rotated.
+    """
+    annotations = item["metadata"].get("annotations") or {}
+    rotated_at = annotations.get("kra/rotated-at")
+    if rotated_at:
+        t = parse_ts(rotated_at)
+        if t:
+            return t
+
     best: Optional[datetime] = parse_ts(item["metadata"].get("creationTimestamp", ""))
     for mf in item["metadata"].get("managedFields") or []:
         if mf.get("operation") in ("Update", "Apply"):
@@ -271,6 +284,16 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
             "-n", argocd_ns,
             "--type=merge",
             "-p", patch)
+
+    # Stamp the rotation timestamp directly on the Secret so that the next
+    # run of cmd_rotate can reliably compare ages across all releases.
+    # (The Secret has helm.sh/resource-policy:keep so Helm never re-applies
+    # it, meaning managedFields stays frozen at the initial deploy time.)
+    rotated_iso = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    kubectl("annotate", "secret", secret_name,
+            "-n", ns,
+            f"kra/rotated-at={rotated_iso}",
+            "--overwrite")
 
     print()
     ok(f"Rotated: {release}")

@@ -23,6 +23,7 @@ import string
 import subprocess
 import sys
 import textwrap
+import time
 import yaml
 from datetime import datetime, timezone
 from typing import Optional
@@ -336,6 +337,25 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
     info(f"New PASSWORD : {db_password_fmt}")
     info(f"Values file  : {values_rel}")
     info("Git pushed   → ArgoCD will sync → checksum/secret changes → pods roll")
+    print()
+
+    # ── Step 4: wait for ArgoCD to go Healthy+Synced ──────────────────────────
+    info(f"Waiting for ArgoCD application '{release}' to become Healthy+Synced...")
+    deadline = time.time() + 120
+    last_health = last_sync = ""
+    while time.time() < deadline:
+        r_h = kubectl("get", "application", release, "-n", argocd_ns,
+                      "-o", "jsonpath={.status.health.status}", check=False)
+        r_s = kubectl("get", "application", release, "-n", argocd_ns,
+                      "-o", "jsonpath={.status.sync.status}", check=False)
+        last_health = r_h.stdout.strip()
+        last_sync   = r_s.stdout.strip()
+        if last_health == "Healthy" and last_sync == "Synced":
+            ok(f"ArgoCD: {release} is Healthy and Synced")
+            break
+        time.sleep(5)
+    else:
+        warn(f"ArgoCD: {release} is {last_health}/{last_sync} after 120s — check 'argocd app get {release}'")
 
 
 # ── cmd: cleanup ──────────────────────────────────────────────────────────────

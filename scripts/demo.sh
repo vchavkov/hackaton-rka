@@ -252,7 +252,7 @@ cmd_deploy() {
     db_password_fmt="$(echo "$db_password" | sed 's/.\{8\}/&-/g; s/-$//')"
 
     bold "[$((i+1))/${#RELEASES[@]}] $release  →  http://${hostname}"
-    info "DB_PASSWORD   = $db_password_fmt"
+    info "PASSWORD      = $db_password_fmt"
     info "Updated       = $updated_at"
 
     # Create ArgoCD Application — ArgoCD will run the Helm install/upgrade.
@@ -279,12 +279,10 @@ spec:
       values: |
         podinfo:
           color: "${color}"
-          message: |
-            Updated:      ${updated_at}
-            DB_PASSWORD:  ${db_password_fmt}
         secret:
           data:
-            DB_PASSWORD: "${db_password}"
+            PASSWORD: "${db_password}"
+            UPDATED_AT: "${updated_at}"
         ingress:
           enabled: true
           className: "${INGRESS_CLASS}"

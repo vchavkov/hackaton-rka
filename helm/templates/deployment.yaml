@@ -47,7 +47,7 @@ spec:
           {{- end }}
           {{- end }}
             - name: PODINFO_UI_MESSAGE
-              value: "PASSWORD: $(PASSWORD)"
+              value: "$(UPDATED_AT) | PASSWORD: $(PASSWORD)"
           # ── secret volume mount ────────────────────────────────────
           volumeMounts:
             - name: secret-volume

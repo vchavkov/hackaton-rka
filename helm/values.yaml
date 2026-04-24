@@ -51,6 +51,7 @@ secret:
   # the rotation agent; the chart just seeds the initial state.
   data:
     PASSWORD: "changeme-initial-db-password"
+    UPDATED_AT: "1970-01-01 00:00 UTC"
 
 # How secrets are consumed by the pod
 secretMount:

@@ -237,12 +237,10 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
     new_values = textwrap.dedent(f"""\
         podinfo:
           color: "{color}"
-          message: |
-            Updated:      {updated_at}
-            DB_PASSWORD:  {db_password_fmt}
         secret:
           data:
-            DB_PASSWORD: "{db_password}"
+            PASSWORD: "{db_password}"
+            UPDATED_AT: "{updated_at}"
         ingress:
           enabled: true
           className: "{ingress_class}"
@@ -270,7 +268,7 @@ def cmd_rotate(ns: str, argocd_ns: str) -> None:
 
     print()
     ok(f"Rotated: {release}")
-    info(f"New DB_PASSWORD : {db_password_fmt}")
+    info(f"New PASSWORD : {db_password_fmt}")
     info("ArgoCD will sync; checksum/secret annotation will trigger a rolling restart")
 
     # Belt-and-suspenders: issue an explicit rollout restart so the pods roll

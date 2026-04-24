@@ -21,8 +21,19 @@ The `checksum/secret` pod annotation is computed at render time from the Secret 
 - `kubectl` connected to a cluster (kind recommended)
 - `helm` v3
 - `argocd` CLI (optional, for manual inspection)
-- Python 3.7+ (for `secret-age.py`)
+- Python 3.7+ (for `secret-age.py` and `argocd-health.py`)
 - `openssl` (used by `demo.sh deploy` to seed random passwords)
+
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/demo.sh`          | End-to-end demo lifecycle: bootstrap, deploy 4 releases, DNS, teardown |
+| `scripts/argocd.sh`        | Install and manage the ArgoCD control plane |
+| `scripts/argocd-health.sh` | Check health + sync status of ArgoCD Applications; exits 1 if any are unhealthy |
+| `scripts/argocd-health.py` | Python implementation of the health check (called by the wrapper) |
+| `scripts/secret-age.sh`    | Shell wrapper that finds `python3` and delegates to `secret-age.py` |
+| `scripts/secret-age.py`    | Report secret age, rotate the oldest secret via ArgoCD, or clean up stale secrets |
 
 ## Quick Start
 
@@ -190,6 +201,37 @@ helm install demo ./helm \
   --set secret.create=false \
   --set secret.existingSecret=my-vault-secret
 ```
+
+## argocd-health.py Reference
+
+`scripts/argocd-health.py` checks the health and sync status of ArgoCD Applications. Invoked via `scripts/argocd-health.sh`.
+
+Exits `0` when all applications are `Healthy + Synced`, exits `1` otherwise — suitable for use in CI or as a readiness gate before running a rotation.
+
+```bash
+# Check all applications in the default ArgoCD namespace
+./scripts/argocd-health.sh
+
+# Check a single application
+./scripts/argocd-health.sh --app kra-alpha
+
+# Machine-readable output
+./scripts/argocd-health.sh --json
+
+# Watch continuously
+watch -n 5 ./scripts/argocd-health.sh
+
+# Use as a gate in CI
+./scripts/argocd-health.sh || echo "cluster not ready"
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--argocd-namespace`, `-n` | `argocd` | Namespace where ArgoCD Applications live |
+| `--app NAME` | all apps | Check a single application by name |
+| `--json` | off | Output results as JSON |
+
+Environment variable override: `ARGOCD_NAMESPACE`.
 
 ## argocd.sh Reference
 
